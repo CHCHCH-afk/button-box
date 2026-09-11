@@ -131,7 +131,9 @@ class BookLibrary:
                 data["books"][key]["cards"] = [uid]
                 _atomic_json(self.path, data)
 
-    def upload(self, source, length, filename, *, run=subprocess.run):
+    def upload(self, source, length, filename, *, upload_id=None, run=subprocess.run):
+        if upload_id is not None and not re.fullmatch(r"[0-9a-f]{32}", upload_id):
+            raise BookError("Invalid upload identifier.")
         suffix = Path(filename).suffix.lower()
         if suffix not in FORMATS:
             raise BookError("Unsupported format: use MP3, WAV, OGG, M4A, FLAC or AAC.")
@@ -146,6 +148,20 @@ class BookLibrary:
                     stale.unlink()
             with _locked_path(self.path):
                 known = self.load()["books"]
+                # Persist the token with the book so a lost HTTP response is safe to retry.
+                if upload_id is not None:
+                    for key, entry in known.items():
+                        if entry.get("upload_id") == upload_id:
+                            if entry.get("source_name") != filename or entry.get("source_bytes") != length:
+                                raise BookError("This upload identifier belongs to another file.")
+                            self.path_for(key)
+                            remaining = length
+                            while remaining:
+                                chunk = source.read(min(remaining, 1024 * 1024))
+                                if not chunk:
+                                    raise BookError("Upload interrupted. Please try again.")
+                                remaining -= len(chunk)
+                            return key
                 # Recover interruption between media rename and catalogue commit (or deletion).
                 for orphan in self.root.glob("*.wav"):
                     if re.fullmatch(r"[0-9a-f]{32}", orphan.stem) and orphan.stem not in known:
@@ -188,6 +204,8 @@ class BookLibrary:
                     final = self.root / f"{key}.wav"
                     os.replace(output_path, final)
                     data["books"][key] = {"title": name, "cards": [], "seconds": seconds, "bytes": final.stat().st_size}
+                    if upload_id is not None:
+                        data["books"][key].update(upload_id=upload_id, source_name=filename, source_bytes=length)
                     try:
                         _atomic_json(self.path, data)
                     except Exception:
@@ -218,6 +236,7 @@ class BookRuntime:
             data = self._load()
             data.pop("request", None)
             data.pop("player", None)
+            data.pop("pairing_sound", None)
             _atomic_json(self.path, data)
 
     def begin_pair(self, key):
@@ -242,6 +261,7 @@ class BookRuntime:
                         raise BookError("Contact pairing is in progress. Finish it before pairing a book.")
                     library.pair(pairing["book"], uid, contacts)
                     pairing["status"] = "paired"
+                    data["pairing_sound"] = self.clock()
                 except BookError as exc:
                     pairing.update(status="error", error=str(exc))
                 _atomic_json(self.path, data)
@@ -253,6 +273,15 @@ class BookRuntime:
                 data["request"] = {"book": key, "created": self.clock()}
                 _atomic_json(self.path, data)
             return True
+
+    def take_pairing_sound(self):
+        with _locked_path(self.path):
+            data = self._load()
+            created = data.pop("pairing_sound", None)
+            if created is not None:
+                _atomic_json(self.path, data)
+                return 0 <= self.clock() - created < MAX_SECONDS + 120
+        return False
 
     def take(self):
         with _locked_path(self.path):

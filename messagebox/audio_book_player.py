@@ -43,6 +43,15 @@ def stop(process):
 def play_pending(button, led, speaker, *, library=None, runtime=None,
                  popen=subprocess.Popen, sleep=time.sleep, clock=time.monotonic):
     library, runtime = library or BookLibrary(), runtime or BookRuntime()
+    if runtime.take_pairing_sound():
+        # Reuse the original pairing chime in the audio owner, after any current audio.
+        from messagebox.onboarding.nfc import TonePlayer
+
+        try:
+            with audio_lock():
+                TonePlayer(directory=RUNTIME_DIR / "audio-book-tones")("success")
+        except (OSError, subprocess.SubprocessError):
+            runtime.player(error="Card paired, but the confirmation sound could not be played.")
     key = runtime.take()
     if key is None:
         return False

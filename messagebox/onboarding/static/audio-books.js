@@ -112,12 +112,13 @@
     }
   }
 
-  function upload(file) {
+  function upload(file, uploadId) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/audio-books/upload");
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
       xhr.setRequestHeader("X-Audio-Filename", encodeURIComponent(file.name));
+      xhr.setRequestHeader("X-Audio-Upload-ID", uploadId);
       xhr.timeout = 15 * 60 * 1000;
       xhr.upload.addEventListener("progress", (event) => {
         if (event.lengthComputable) progress.value = event.loaded / event.total;
@@ -126,13 +127,29 @@
       xhr.addEventListener("load", () => {
         let data;
         try { data = JSON.parse(xhr.responseText); } catch { data = {}; }
-        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-        else reject(new Error(data.error || "Import failed. Please try again."));
+        if (xhr.status >= 200 && xhr.status < 300 && data.ok && data.id) resolve(data);
+        else reject(Object.assign(new Error(data.error || "Import failed. Please try again."), {
+          retryable: xhr.status === 0 || xhr.status === 408 || xhr.status === 429 || xhr.status >= 500,
+        }));
       });
-      xhr.addEventListener("error", () => reject(new Error("Connection interrupted. Check the library before trying again.")));
-      xhr.addEventListener("timeout", () => reject(new Error("Upload timed out. Check the library before trying again.")));
+      xhr.addEventListener("error", () => reject(Object.assign(new Error("Connection interrupted. Check the library before trying again."), { retryable: true })));
+      xhr.addEventListener("timeout", () => reject(Object.assign(new Error("Upload timed out. Check the library before trying again."), { retryable: true })));
       xhr.send(file);
     });
+  }
+
+  async function uploadWithRetry(file) {
+    const uploadId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await upload(file, uploadId);
+      } catch (error) {
+        if (!error.retryable || attempt === 3) throw error;
+        status.textContent = `Connection problem. Retrying “${file.name}” (${attempt + 1}/3)…`;
+        await new Promise((resolve) => window.setTimeout(resolve, attempt * 2000));
+        progress.value = 0;
+      }
+    }
   }
 
   async function uploadFiles(files) {
@@ -149,7 +166,7 @@
         if (!/\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(file.name)) throw new Error("Unsupported format.");
         if (!file.size || file.size > 256 * 1024 * 1024) throw new Error("The file is empty or larger than 256 MB.");
         status.textContent = `Uploading “${file.name}”…`;
-        await upload(file);
+        await uploadWithRetry(file);
         imported++;
       } catch (error) {
         errors.push(`${file.name} : ${error.message}`);
