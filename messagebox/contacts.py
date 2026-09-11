@@ -420,6 +420,9 @@ class ContactStore:
         uid = _normalize_uid(uid)
 
         def assign(document):
+            from messagebox.audio_books import card_is_book
+            if card_is_book(self.path, uid):
+                raise ContactError("This card belongs to an Audio Book. Unpair it in Audio Book first.")
             contacts = document["contacts"]
             if jid not in contacts:
                 raise ContactError("contact does not exist")
@@ -450,6 +453,9 @@ class ContactStore:
             raise ContactError("create_contact must be true or false")
 
         def enroll(document):
+            from messagebox.audio_books import card_is_book
+            if card_is_book(self.path, uid):
+                raise ContactError("This card belongs to an Audio Book. Unpair it in Audio Book first.")
             contacts = document["contacts"]
             changed = False
             if jid not in contacts:

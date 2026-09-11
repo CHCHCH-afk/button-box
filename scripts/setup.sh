@@ -18,14 +18,14 @@ ONBOARDING_CONFIG_DIR=/etc/messagebox-onboarding
 ONBOARDING_DATA_DIR=/var/lib/messagebox-onboarding
 SETTINGS_DIR=/var/lib/messagebox-settings
 SSH_TARGET=${MESSAGEBOX_SSH_TARGET:-}
-PACKAGE_PYTHON="__init__.py button_send.py contacts.py guided_reply.py listened_receipts.py
+PACKAGE_PYTHON="__init__.py audio_books.py audio_book_player.py audio_book_dashboard.py button_send.py contacts.py guided_reply.py listened_receipts.py
 make_ringtones.py nfc.py nfc_state.py runtime_paths.py settings.py tailnet.py voicepoll.py wifi_change.py"
 DASHBOARD_PYTHON="dashboard/__init__.py dashboard/app.py"
 ONBOARDING_PYTHON="onboarding/__init__.py onboarding/app.py
 onboarding/comitup_adapter.py onboarding/connectivity.py onboarding/initialize.py
 onboarding/completion.py onboarding/nfc.py onboarding/paths.py onboarding/recipients.py onboarding/reset.py onboarding/state.py
 onboarding/voice_gate.py onboarding/whatsapp.py"
-STATIC_ASSETS="onboarding/static/app.js onboarding/static/index.html onboarding/static/styles.css"
+STATIC_ASSETS="onboarding/static/app.js onboarding/static/audio-books.js onboarding/static/index.html onboarding/static/styles.css"
 GUIDED_PROMPT_DIR=$REPO_DIR/sounds/guided-reply
 
 case "$SSH_TARGET" in
@@ -265,6 +265,7 @@ sudo install -d -o root -g "$SETTINGS_GROUP" -m 2770 "$SETTINGS_DIR"
 sudo install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 \
   "$DATA_DIR" \
   "$DATA_DIR/assets" \
+  "$DATA_DIR/audio-books" \
   "$DATA_DIR/outbox" \
   "$DATA_DIR/queue" \
   "$DATA_DIR/state" \

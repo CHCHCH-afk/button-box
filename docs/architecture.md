@@ -1,5 +1,15 @@
 # Architecture
 
+## Personal Audio Book extension
+
+The personal fork isolates its library, playback and API in `audio_books.py`,
+`audio_book_player.py` and `audio_book_dashboard.py`. The NFC daemon hands book
+requests to the existing button service, which owns playback and consumes pause
+presses. WhatsApp polling continues, but arrival notifications wait until book
+playback (including a pause) finishes. Media and NFC mappings live under
+`/var/lib/messagebox/audio-books`, outside the installed code directory. No
+playback position is persisted. See [audio-books.md](audio-books.md).
+
 Button Box runs as separate systemd services with constrained users and
 permissions. Runtime services use the `messagebox` account, while the web
 onboarding service uses `messagebox-onboarding`. systemd limits filesystem,

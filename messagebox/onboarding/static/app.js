@@ -5,6 +5,7 @@ const views = [
   "setup",
   "settings",
   "activity",
+  "audio-book",
   "advanced",
   "wifi",
   "checking",
@@ -980,7 +981,7 @@ async function route() {
     applyState(currentState);
     return;
   }
-  const canonical = new Set(["home", "setup", "settings", "activity", "advanced"]);
+  const canonical = new Set(["home", "setup", "settings", "activity", "advanced", "audio-book"]);
   const selected = canonical.has(routeName) ? routeName : "home";
   showView(selected);
   if (selected === "home") renderHome(currentState);

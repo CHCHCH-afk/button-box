@@ -1,5 +1,9 @@
 # Installation
 
+For the personal Audio Book version, install from
+`https://github.com/CHCHCH-afk/button-box`. See [audio-books.md](audio-books.md)
+for library use, persistent storage and merging future upstream updates.
+
 Validate installation changes on a spare Raspberry Pi 4 and microSD card. Do
 not overwrite a working device without a tested backup.
 

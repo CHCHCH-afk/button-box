@@ -7,6 +7,7 @@
   <title>Button Box</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="/static/app.js" defer></script>
+  <script src="/static/audio-books.js" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -20,6 +21,7 @@
       <a href="#setup" data-route="setup">Setup</a>
       <a href="#settings" data-route="settings">Settings</a>
       <a href="#activity" data-route="activity">Activity</a>
+      <a href="#audio-book" data-route="audio-book">Audio Book</a>
       <a href="#advanced" data-route="advanced">Advanced</a>
     </nav>
 
@@ -101,6 +103,25 @@
         <button type="submit">Save settings</button>
         <p id="settings-status" class="status" role="status" aria-live="polite"></p>
       </form>
+    </section>
+
+    <section class="card" id="audio-book-view" aria-labelledby="audio-book-title" hidden>
+      <p class="eyebrow">Votre bibliothèque personnelle</p>
+      <h1 id="audio-book-title" tabindex="-1">Audio Book</h1>
+      <p class="lede">Une carte, une histoire. Présentez la carte pour commencer au début. Le bouton met en pause et reprend la lecture.</p>
+      <p class="field-help">Les notifications WhatsApp attendent la fin du livre, même pendant une pause. Aucune progression n’est sauvegardée.</p>
+      <div id="books-drop" class="book-drop">
+        <label for="books-files">Glissez vos fichiers ici ou choisissez des fichiers audio</label>
+        <input id="books-files" type="file" multiple accept=".mp3,.wav,.ogg,.m4a,.flac,.aac">
+        <p class="field-help">Un fichier par livre · MP3, WAV, OGG, M4A, FLAC, AAC · 256 Mo maximum par fichier · une heure maximum.</p>
+      </div>
+      <progress id="books-progress" max="1" value="0" aria-label="Progression du transfert" hidden></progress>
+      <p id="books-status" role="status" aria-live="polite"></p>
+      <p id="books-storage" class="field-help"></p>
+      <p id="books-playing" role="status" aria-live="polite"></p>
+      <p id="books-pairing" role="status" aria-live="polite"></p>
+      <button id="books-cancel-pair" type="button" class="secondary" hidden>Annuler l’appariage</button>
+      <div id="books-list"></div>
     </section>
 
     <section class="card" id="activity-view" aria-labelledby="activity-title" hidden>

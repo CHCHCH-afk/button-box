@@ -16,6 +16,9 @@ from zoneinfo import ZoneInfo
 
 from gpiozero import Button, LED
 
+from messagebox.audio_book_player import play_pending as play_pending_book
+from messagebox.audio_books import BookRuntime
+
 from messagebox.guided_reply import (
     EnergyVAD,
     GuidedSession,
@@ -226,6 +229,7 @@ def legacy_outbox_files():
 
 
 _recording = False
+_book_active = False
 _guided_active = False
 outbox_store = None
 receipt_store = None
@@ -645,7 +649,7 @@ def sender_loop():
             failures += 1
             if failures == SEND_FAIL_BEEP_AT:
                 log_event("send_failed", flow="legacy", reason="send")
-                if not _recording and not _guided_active:
+                if not _recording and not _guided_active and not _book_active:
                     beep("fail")
             time.sleep(min(60, 5 * failures))
             continue
@@ -1286,6 +1290,18 @@ def validate_prompts():
         )
 
 
+def maybe_play_book():
+    global _book_active, _known
+    # Prime arrival tracking before the first book, so its arrivals ring afterward.
+    if _known is None:
+        mark_queue_known()
+    _book_active = True
+    try:
+        return play_pending_book(button, led, SPK_DEV)
+    finally:
+        _book_active = False
+
+
 def main():
     global button, led, outbox_store, receipt_store
     make_beeps()
@@ -1320,6 +1336,7 @@ def main():
     threading.Thread(target=sender_loop, daemon=True).start()
     button = Button(BUTTON_PIN)
     led = LED(LED_PIN)
+    BookRuntime().reset_player()
     apply_master_volume()
     if button.is_pressed:
         log("switch CLOSED at startup - waiting for it to open")
@@ -1339,6 +1356,8 @@ def main():
         while not button.is_pressed:
             time.sleep(POLL_S)
             apply_master_volume()
+            if maybe_play_book():
+                continue
             play_pending_nfc_announcement()
             maybe_play_pending_listened()
             refresh_led()
@@ -1352,6 +1371,8 @@ def main():
                 solid = False
                 break
         if not solid:
+            continue
+        if maybe_play_book():
             continue
         interaction_settings = caregiver_settings()
         try:

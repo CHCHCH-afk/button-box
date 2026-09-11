@@ -315,6 +315,15 @@ button.compact { min-height: 2.5rem; padding: 0.45rem 0.8rem; }
 
 .page-error { margin-top: 1.5rem; font-weight: 700; }
 
+.book-drop { border: 2px dashed var(--line); border-radius: 1rem; padding: 1.5rem; margin-top: 1.5rem; }
+.book-drop.book-dragging { border-color: var(--action); background: var(--surface); }
+.book-drop input { max-width: 100%; }
+.book-entry { padding: 1.5rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.book-entry h2 { margin-top: 0; }
+.book-entry .button-row { flex-wrap: wrap; margin-top: 0.75rem; }
+#books-progress { width: 100%; margin-top: 1rem; }
+#books-status, #books-playing, #books-pairing { overflow-wrap: anywhere; }
+
 @keyframes pulse {
   70% { box-shadow: 0 0 0 1rem rgba(105, 197, 165, 0); }
   100% { box-shadow: 0 0 0 0 rgba(105, 197, 165, 0); }

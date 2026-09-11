@@ -38,6 +38,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from messagebox.contacts import ContactError, ContactStore, validate_contact
+from messagebox.audio_book_dashboard import get_books, post_books
+from messagebox.audio_book_player import audio_lock
 from messagebox.nfc import router as nfc_router
 from messagebox.nfc_state import NfcError, active_selection
 from messagebox.runtime_paths import APP_DIR, CONTACTS_FILE, OUTBOX_DIR as DEFAULT_OUTBOX_DIR
@@ -96,6 +98,10 @@ DASHBOARD_STATIC = {
     "/static/styles.css": (
         DASHBOARD_STATIC_DIR.joinpath("styles.css").read_bytes(),
         "text/css; charset=utf-8",
+    ),
+    "/static/audio-books.js": (
+        DASHBOARD_STATIC_DIR.joinpath("audio-books.js").read_bytes(),
+        "text/javascript; charset=utf-8",
     ),
 }
 RINGTONE_PREVIEW_LOCK = threading.Lock()
@@ -234,6 +240,11 @@ def preview_ringtone(ringtone_id):
         raise SettingsError("ringtone is unavailable")
     if not RINGTONE_PREVIEW_LOCK.acquire(blocking=False):
         raise SettingsError("Button Box audio is busy")
+    try:
+        book_lock = audio_lock(blocking=False)
+    except OSError as exc:
+        RINGTONE_PREVIEW_LOCK.release()
+        raise SettingsError("Audio Book playback is active. Wait until it finishes.") from exc
 
     def play():
         try:
@@ -243,6 +254,7 @@ def preview_ringtone(ringtone_id):
                 timeout=30,
             )
         finally:
+            book_lock.close()
             RINGTONE_PREVIEW_LOCK.release()
 
     threading.Thread(target=play, daemon=True).start()
@@ -1068,6 +1080,8 @@ class Handler(BaseHTTPRequestHandler):
         static = DASHBOARD_STATIC.get(url.path)
         if static is not None:
             return self._send(200, *static)
+        if url.path == "/api/audio-books":
+            return get_books(self)
         if url.path == "/api/state":
             return self._send(200, json.dumps(runtime_state()))
         if url.path == "/api/settings":
@@ -1159,6 +1173,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         if url.path != "/api/wacli-receipt" and not self._require_same_origin():
             return
+        if url.path in {"/api/audio-books", "/api/audio-books/upload"}:
+            return post_books(self, url.path)
         if url.path == "/api/ringtone-preview":
             payload = self._json_body(1024)
             if payload is None:

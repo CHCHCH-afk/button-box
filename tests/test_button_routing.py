@@ -26,6 +26,34 @@ class FakeLed:
 
 
 class ButtonRoutingTests(unittest.TestCase):
+    def test_book_arrivals_wait_until_playback_returns_then_ring_once(self):
+        waiting = []
+
+        def play(*args):
+            self.assertTrue(button_send._book_active)
+            waiting.append("new.wav")
+            self.assertNotIn("new.wav", button_send._known)
+            return True
+
+        with (
+            mock.patch.object(button_send, "queued", side_effect=lambda: waiting[:]),
+            mock.patch.object(button_send, "_known", None),
+            mock.patch.object(button_send, "_seen_ever", set()),
+            mock.patch.object(button_send, "_ring_last", -100),
+            mock.patch.object(button_send, "button", mock.Mock(), create=True),
+            mock.patch.object(button_send, "led", mock.Mock(), create=True),
+            mock.patch.object(button_send, "play_pending_book", side_effect=play),
+            mock.patch.object(button_send, "caregiver_settings", return_value={"arrival_signal": "ring_and_lamp"}),
+            mock.patch.object(button_send, "quiet_hours", return_value=False),
+            mock.patch.object(button_send, "ring_alert") as ring,
+        ):
+            self.assertTrue(button_send.maybe_play_book())
+            self.assertFalse(button_send._book_active)
+            ring.assert_not_called()
+            button_send.maybe_ring()
+            button_send.maybe_ring()
+            ring.assert_called_once()
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)

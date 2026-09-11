@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from messagebox.contacts import ContactError, ContactStore
+from messagebox.audio_books import BookLibrary, BookRuntime
 from messagebox.nfc_state import (
     AnnouncementStore,
     DEFAULT_ENROLLMENT_TTL_S,
@@ -106,11 +107,15 @@ class NfcRuntime:
         *,
         removal_grace=REMOVAL_GRACE_S,
         refresh=REFRESH_S,
+        books=None,
+        book_runtime=None,
     ):
         self.router = router
         self.announcer = announcer
         self.removal_grace = removal_grace
         self.refresh = refresh
+        self.books = books
+        self.book_runtime = book_runtime
         self.uid = None
         self.last_seen = None
         self.last_refresh = None
@@ -129,20 +134,32 @@ class NfcRuntime:
             return None
         uid = normalize_uid(raw_uid)
         if self.uid != uid:
-            result = self.router.card_seen(uid, new_presentation=True)
+            result = self.card_seen(uid, new_presentation=True)
             self.uid = uid
             self.last_seen = self.last_refresh = now
             self.announcer.announce(result)
             return result
         self.last_seen = now
         if self.last_refresh is None or now - self.last_refresh >= self.refresh:
-            result = self.router.card_seen(uid, new_presentation=False)
+            result = self.card_seen(uid, new_presentation=False)
             self.last_refresh = now
             if result.action == "unknown":
                 return None
             self.announcer.announce(result)
             return result
         return None
+
+    def card_seen(self, uid, *, new_presentation):
+        if self.books is not None and self.book_runtime.scan(
+            uid, self.books, self.router.contacts,
+            new_presentation=new_presentation,
+            contact_enrollment=self.router.enrollment.active() is not None,
+        ):
+            from messagebox.nfc_state import ScanResult
+            self.router.selection.clear()
+            self.router.announcements.clear()
+            return ScanResult("audio_book")
+        return self.router.card_seen(uid, new_presentation=new_presentation)
 
 
 def router(announcement_store=None):
@@ -160,7 +177,7 @@ def run_daemon():
     announcement_store = AnnouncementStore(NFC_ANNOUNCEMENT_FILE)
     nfc_router = router(announcement_store)
     announcer = Announcer(announcement_store)
-    runtime = NfcRuntime(nfc_router, announcer)
+    runtime = NfcRuntime(nfc_router, announcer, books=BookLibrary(), book_runtime=BookRuntime())
     nfc_router.selection.clear()
     announcement_store.clear()
     try:

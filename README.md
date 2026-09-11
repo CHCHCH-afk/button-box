@@ -1,5 +1,10 @@
 # Button Box
 
+**Personal fork — Audio Book:** this version adds NFC-triggered short audio
+books, button pause/resume, and a dashboard library with drag-and-drop imports
+stored on the microSD. WhatsApp arrival signals wait until the book finishes.
+See [Audio Book usage, installation and updates](docs/audio-books.md).
+
 **Button Box is a screen-free way for kids to send and receive WhatsApp voice
 messages with family on their own.**
 
@@ -95,7 +100,7 @@ Point a capable coding agent at this repository and give it this prompt:
 
 ```text
 Help me build a Button Box from this repository:
-https://github.com/button-box/button-box
+https://github.com/CHCHCH-afk/button-box
 
 Read README.md and AGENTS.md before giving instructions. First ask whether I
 have a Raspberry Pi Zero 2 W or Raspberry Pi 4B. Work one numbered step at a
@@ -180,7 +185,7 @@ and power it on.
 On the computer that will provision the Pi:
 
 ```sh
-git clone https://github.com/button-box/button-box.git
+git clone https://github.com/CHCHCH-afk/button-box.git
 cd button-box
 ```
 
@@ -523,8 +528,7 @@ GPIO, NFC, Wi-Fi, or WhatsApp behaviors were physically tested.
 ## Repository map
 
 - `messagebox/`: device runtime, dashboard, and onboarding package
-- `messagebox/dashboard/static/`: private dashboard assets
-- `messagebox/onboarding/static/`: household onboarding portal
+- `messagebox/onboarding/static/`: shared household dashboard and onboarding assets, including Audio Book
 - `scripts/`: installation, provisioning, and command wrappers
 - `scripts/dev/`: experimental developer onboarding and hardware checks
 - `systemd/`: device services and runtime target

@@ -79,6 +79,9 @@ rsync -azR \
   "$REPO_DIR/./scripts/setup.sh" \
   "$REPO_DIR/./sounds/" \
   "$REPO_DIR/./messagebox/__init__.py" \
+  "$REPO_DIR/./messagebox/audio_books.py" \
+  "$REPO_DIR/./messagebox/audio_book_player.py" \
+  "$REPO_DIR/./messagebox/audio_book_dashboard.py" \
   "$REPO_DIR/./messagebox/button_send.py" \
   "$REPO_DIR/./messagebox/contacts.py" \
   "$REPO_DIR/./messagebox/guided_reply.py" \
@@ -108,6 +111,7 @@ rsync -azR \
   "$REPO_DIR/./messagebox/onboarding/voice_gate.py" \
   "$REPO_DIR/./messagebox/onboarding/whatsapp.py" \
   "$REPO_DIR/./messagebox/onboarding/static/app.js" \
+  "$REPO_DIR/./messagebox/onboarding/static/audio-books.js" \
   "$REPO_DIR/./messagebox/onboarding/static/index.html" \
   "$REPO_DIR/./messagebox/onboarding/static/styles.css" \
   "$REPO_DIR/./systemd/" \
