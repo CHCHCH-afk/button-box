@@ -72,7 +72,7 @@ def play_pending(button, led, speaker, *, library=None, runtime=None,
                 led.off()
                 if process.poll() is not None:
                     if process.returncode:
-                        raise BookError("La lecture a échoué. Vérifiez le haut-parleur et réessayez.")
+                        raise BookError("Playback failed. Check the speaker and try again.")
                     break
                 now = clock()
                 pressed = bool(button.is_pressed)
@@ -89,7 +89,7 @@ def play_pending(button, led, speaker, *, library=None, runtime=None,
                     heartbeat = now
                 sleep(0.01)
     except (BookError, OSError, subprocess.SubprocessError):
-        error = "Lecture impossible. Vérifiez le livre et le haut-parleur, puis présentez à nouveau la carte."
+        error = "Playback failed. Check the book and speaker, then scan the card again."
     finally:
         stop(process)
         runtime.player(error=error)

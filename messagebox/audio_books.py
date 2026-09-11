@@ -30,15 +30,15 @@ class BookError(ValueError):
 
 def book_id(value):
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value):
-        raise BookError("Livre introuvable.")
+        raise BookError("Book not found.")
     return value
 
 
 def title(value):
     if not isinstance(value, str) or not value.strip() or len(value) > 120:
-        raise BookError("Le titre doit contenir entre 1 et 120 caractères.")
+        raise BookError("The title must contain between 1 and 120 characters.")
     if any(ord(char) < 32 for char in value):
-        raise BookError("Le titre contient un caractère non autorisé.")
+        raise BookError("The title contains an unsupported character.")
     return value.strip()
 
 
@@ -50,22 +50,22 @@ class BookLibrary:
     def load(self):
         data = _load_json(self.path, {"version": 1, "books": {}})
         if data.get("version") != 1 or not isinstance(data.get("books"), dict):
-            raise BookError("La bibliothèque ne peut pas être lue.")
+            raise BookError("The library could not be read.")
         cards = set()
         for key, entry in data["books"].items():
             book_id(key)
             if not isinstance(entry, dict):
-                raise BookError("La bibliothèque ne peut pas être lue.")
+                raise BookError("The library could not be read.")
             title(entry.get("title"))
             if not isinstance(entry.get("cards"), list):
-                raise BookError("Les associations NFC ne peuvent pas être lues.")
+                raise BookError("NFC associations could not be read.")
             if (type(entry.get("seconds")) not in (float, int)
                     or not math.isfinite(entry["seconds"]) or not 0 < entry["seconds"] <= MAX_SECONDS
                     or type(entry.get("bytes")) is not int or entry["bytes"] <= 0):
-                raise BookError("La bibliothèque ne peut pas être lue.")
+                raise BookError("The library could not be read.")
             for uid in entry["cards"]:
                 if normalize_uid(uid) != uid or uid in cards:
-                    raise BookError("Les associations NFC ne peuvent pas être lues.")
+                    raise BookError("NFC associations could not be read.")
                 cards.add(uid)
         return data
 
@@ -84,10 +84,10 @@ class BookLibrary:
     def path_for(self, key):
         key = book_id(key)
         if key not in self.load()["books"]:
-            raise BookError("Livre introuvable.")
+            raise BookError("Book not found.")
         path = self.root / f"{key}.wav"
         if not path.is_file() or path.is_symlink():
-            raise BookError("Le fichier de ce livre est indisponible.")
+            raise BookError("The audio file for this book is unavailable.")
         return path
 
     def contains_card(self, uid):
@@ -102,7 +102,7 @@ class BookLibrary:
         with _locked_path(self.path):
             data = self.load()
             if key not in data["books"]:
-                raise BookError("Livre introuvable.")
+                raise BookError("Book not found.")
             if action == "rename":
                 data["books"][key]["title"] = title(value)
             elif action == "unpair":
@@ -110,7 +110,7 @@ class BookLibrary:
             elif action == "delete":
                 del data["books"][key]
             else:
-                raise BookError("Action inconnue.")
+                raise BookError("Unknown action.")
             _atomic_json(self.path, data)
             if action == "delete":
                 (self.root / f"{key}.wav").unlink(missing_ok=True)
@@ -120,11 +120,11 @@ class BookLibrary:
         # Same lock order as contact assignment: contacts, then library.
         with contacts._locked():
             if contacts.resolve_card(uid) is not None:
-                raise BookError("Cette carte est associée à un contact WhatsApp. Dissociez-la d’abord.")
+                raise BookError("This card belongs to a WhatsApp contact. Unpair it first.")
             with _locked_path(self.path):
                 data = self.load()
                 if key not in data["books"]:
-                    raise BookError("Livre introuvable.")
+                    raise BookError("Book not found.")
                 for entry in data["books"].values():
                     if uid in entry["cards"]:
                         entry["cards"].remove(uid)
@@ -134,9 +134,9 @@ class BookLibrary:
     def upload(self, source, length, filename, *, run=subprocess.run):
         suffix = Path(filename).suffix.lower()
         if suffix not in FORMATS:
-            raise BookError("Format incompatible : utilisez MP3, WAV, OGG, M4A, FLAC ou AAC.")
+            raise BookError("Unsupported format: use MP3, WAV, OGG, M4A, FLAC or AAC.")
         if not 0 < length <= MAX_UPLOAD_BYTES:
-            raise BookError("Le fichier est vide ou dépasse 256 Mo.")
+            raise BookError("The file is empty or exceeds the 256 MB limit.")
         name = title(Path(filename.replace("\\", "/")).stem[:120])
         self.root.mkdir(parents=True, exist_ok=True)
         # Serialize large transfers, reserve room for decoding, and never expose a partial book.
@@ -151,7 +151,7 @@ class BookLibrary:
                     if re.fullmatch(r"[0-9a-f]{32}", orphan.stem) and orphan.stem not in known:
                         orphan.unlink()
             if shutil.disk_usage(self.root).free < length + MAX_WAV_BYTES + RESERVE_BYTES:
-                raise BookError("Espace insuffisant sur la microSD pour importer ce livre.")
+                raise BookError("Not enough space on the microSD to import this book.")
             upload_path = output_path = None
             try:
                 with tempfile.NamedTemporaryFile(dir=self.root, prefix=".upload-", delete=False) as handle:
@@ -160,7 +160,7 @@ class BookLibrary:
                     while remaining:
                         chunk = source.read(min(remaining, 1024 * 1024))
                         if not chunk:
-                            raise BookError("Transfert interrompu. Réessayez.")
+                            raise BookError("Upload interrupted. Please try again.")
                         handle.write(chunk)
                         remaining -= len(chunk)
                     handle.flush()
@@ -174,11 +174,11 @@ class BookLibrary:
                     "-f", "wav", str(output_path),
                 ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600, check=False)
                 if result.returncode:
-                    raise BookError("Fichier audio illisible ou incompatible.")
+                    raise BookError("The audio file is unreadable or unsupported.")
                 with wave.open(str(output_path), "rb") as audio:
                     seconds = audio.getnframes() / audio.getframerate()
                 if not 0 < seconds <= MAX_SECONDS:
-                    raise BookError("Le livre doit durer moins d’une heure.")
+                    raise BookError("The book must be no longer than one hour.")
                 key = uuid.uuid4().hex
                 with open(output_path, "rb") as handle:
                     os.fsync(handle.fileno())
@@ -196,10 +196,10 @@ class BookLibrary:
                 return key
             except OSError as exc:
                 if exc.errno == errno.ENOSPC:
-                    raise BookError("La microSD est pleine. Libérez de l’espace puis réessayez.") from exc
-                raise BookError("Impossible d’enregistrer le livre sur la microSD.") from exc
+                    raise BookError("The microSD is full. Free up space and try again.") from exc
+                raise BookError("The book could not be saved to the microSD.") from exc
             except (subprocess.SubprocessError, wave.Error, EOFError) as exc:
-                raise BookError("Import impossible. Vérifiez le fichier puis réessayez.") from exc
+                raise BookError("Import failed. Check the file and try again.") from exc
             finally:
                 for path in (upload_path, output_path):
                     if path is not None:
@@ -239,7 +239,7 @@ class BookRuntime:
             if new_presentation and pairing.get("status") == "waiting" and pairing.get("expires", 0) > self.clock():
                 try:
                     if contact_enrollment:
-                        raise BookError("Un appariage de contact est en cours. Terminez-le avant d’associer un livre.")
+                        raise BookError("Contact pairing is in progress. Finish it before pairing a book.")
                     library.pair(pairing["book"], uid, contacts)
                     pairing["status"] = "paired"
                 except BookError as exc:

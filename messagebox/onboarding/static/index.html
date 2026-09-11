@@ -106,21 +106,22 @@
     </section>
 
     <section class="card" id="audio-book-view" aria-labelledby="audio-book-title" hidden>
-      <p class="eyebrow">Votre bibliothèque personnelle</p>
+      <p class="eyebrow">Your personal library</p>
       <h1 id="audio-book-title" tabindex="-1">Audio Book</h1>
-      <p class="lede">Une carte, une histoire. Présentez la carte pour commencer au début. Le bouton met en pause et reprend la lecture.</p>
-      <p class="field-help">Les notifications WhatsApp attendent la fin du livre, même pendant une pause. Aucune progression n’est sauvegardée.</p>
+      <p class="lede">One card, one story. Scan the card to start from the beginning. Press the button to pause or resume.</p>
+      <p class="field-help">WhatsApp notifications wait until the book ends, including while paused. Playback progress is never saved.</p>
       <div id="books-drop" class="book-drop">
-        <label for="books-files">Glissez vos fichiers ici ou choisissez des fichiers audio</label>
-        <input id="books-files" type="file" multiple accept=".mp3,.wav,.ogg,.m4a,.flac,.aac">
-        <p class="field-help">Un fichier par livre · MP3, WAV, OGG, M4A, FLAC, AAC · 256 Mo maximum par fichier · une heure maximum.</p>
+        <p>Drop your audio files here</p>
+        <button id="books-browse" type="button" class="secondary">Choose audio files</button>
+        <input id="books-files" type="file" aria-label="Choose audio files" multiple accept=".mp3,.wav,.ogg,.m4a,.flac,.aac" hidden>
+        <p class="field-help">One file per book · MP3, WAV, OGG, M4A, FLAC, AAC · 256 MB per file · up to one hour.</p>
       </div>
-      <progress id="books-progress" max="1" value="0" aria-label="Progression du transfert" hidden></progress>
+      <progress id="books-progress" max="1" value="0" aria-label="Upload progress" hidden></progress>
       <p id="books-status" role="status" aria-live="polite"></p>
       <p id="books-storage" class="field-help"></p>
       <p id="books-playing" role="status" aria-live="polite"></p>
       <p id="books-pairing" role="status" aria-live="polite"></p>
-      <button id="books-cancel-pair" type="button" class="secondary" hidden>Annuler l’appariage</button>
+      <button id="books-cancel-pair" type="button" class="secondary" hidden>Cancel pairing</button>
       <div id="books-list"></div>
     </section>
 

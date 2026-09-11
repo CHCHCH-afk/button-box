@@ -12,7 +12,7 @@ has an **Audio Book** section. The existing WhatsApp setup is still required.
 3. Wait for transfer and audio validation to finish. Only a successful import
    appears in the library. Files are converted to mono 24 kHz PCM WAV for the
    existing ALSA player; this uses about 2.9 MB per minute on the microSD.
-4. Select **Associer une carte NFC**, remove any card already on the reader, then
+4. Select **Pair NFC card**, remove any card already on the reader, then
    present the intended card within two minutes. Pairing does not play the book.
 5. Remove and present the card again to play from the beginning. A brief button
    press pauses; the next press resumes. A held press toggles only once. No

@@ -56,7 +56,7 @@ class DashboardBookTests(unittest.TestCase):
             code, data = self.post("/api/audio-books/upload", b"x", **{"Content-Type": "application/octet-stream"})
         self.assertEqual(code, 503)
         self.assertNotIn("private", json.dumps(data))
-        with mock.patch.object(self.library, "upload", side_effect=BookError("La microSD est pleine.")):
+        with mock.patch.object(self.library, "upload", side_effect=BookError("The microSD is full.")):
             code, data = self.post("/api/audio-books/upload", b"x", **{"Content-Type": "application/octet-stream"})
         self.assertEqual(code, 400)
         self.assertIn("microSD", data["error"])
