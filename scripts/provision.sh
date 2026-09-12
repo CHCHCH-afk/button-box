@@ -67,6 +67,7 @@ cd "$REPO_DIR"
 REPO_DIR=.
 rsync -azR \
   "$REPO_DIR/./config/env.example" \
+  "$REPO_DIR/./config/messagebox-alsa.conf" \
   "$REPO_DIR/./config/onboarding/" \
   "$REPO_DIR/./config/requirements-nfc.txt" \
   "$REPO_DIR/./scripts/install/" \
@@ -80,6 +81,7 @@ rsync -azR \
   "$REPO_DIR/./sounds/" \
   "$REPO_DIR/./messagebox/__init__.py" \
   "$REPO_DIR/./messagebox/audio_books.py" \
+  "$REPO_DIR/./messagebox/audio_volume.py" \
   "$REPO_DIR/./messagebox/audio_book_player.py" \
   "$REPO_DIR/./messagebox/audio_book_dashboard.py" \
   "$REPO_DIR/./messagebox/button_send.py" \

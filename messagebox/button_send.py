@@ -18,6 +18,7 @@ from gpiozero import Button, LED
 
 from messagebox.audio_book_player import play_pending as play_pending_book
 from messagebox.audio_books import BookRuntime
+from messagebox.audio_volume import SOFTWARE_DEVICE, apply_volume, playback_device
 
 from messagebox.guided_reply import (
     EnergyVAD,
@@ -51,9 +52,7 @@ from messagebox.settings import SettingsReader, ringtone_path
 
 
 MIC_DEV = os.environ.get("MSGBOX_MIC_DEV", "plughw:CARD=Device,DEV=0")
-SPK_DEV = os.environ.get("MSGBOX_SPK_DEV", "plughw:CARD=Device_1,DEV=0")
-SPEAKER_CARD = os.environ.get("MSGBOX_SPEAKER_CARD", "Device")
-SPEAKER_CONTROL = os.environ.get("MSGBOX_SPEAKER_CONTROL", "PCM")
+SPK_DEV = SOFTWARE_DEVICE
 BUTTON_PIN = int(os.environ.get("MSGBOX_BUTTON_PIN", "17"))
 LED_PIN = int(os.environ.get("MSGBOX_LED_PIN", "26"))
 LOCK_WAIT = os.environ.get("MSGBOX_LOCK_WAIT", "60s")
@@ -163,20 +162,7 @@ def apply_master_volume(settings=None):
     settings = settings or caregiver_settings()
     if settings["revision"] == _applied_volume_revision:
         return True
-    result = subprocess.run(
-        [
-            "amixer",
-            "-q",
-            "-c",
-            SPEAKER_CARD,
-            "sset",
-            SPEAKER_CONTROL,
-            f'{settings["master_volume_percent"]}%',
-            "unmute",
-        ],
-        check=False,
-    )
-    if result.returncode == 0:
+    if apply_volume():
         _applied_volume_revision = settings["revision"]
         return True
     return False
@@ -202,7 +188,11 @@ def make_beeps():
 
 
 def beep(name):
-    subprocess.run(["aplay", "-q", "-D", SPK_DEV, BEEPS[name][0]])
+    try:
+        subprocess.run(["aplay", "-q", "-D", playback_device(), BEEPS[name][0]])
+    except (OSError, subprocess.SubprocessError):
+        # Optional feedback must not stop the WhatsApp sender when USB is absent.
+        log("notification sound unavailable")
 
 
 def acknowledge_guided_press(action, session_id=None):
@@ -330,7 +320,7 @@ def prompt_for_token():
     """Refuse outbound recording without leaking the previous selection."""
     log_event("nfc_token_required")
     if os.path.isfile(PLACE_TOKEN_WAV):
-        subprocess.run(["aplay", "-q", "-D", SPK_DEV, PLACE_TOKEN_WAV], check=False)
+        subprocess.run(["aplay", "-q", "-D", playback_device(), PLACE_TOKEN_WAV], check=False)
     else:
         log(f"place-token prompt missing: {PLACE_TOKEN_WAV}")
         beep("fail")
@@ -358,7 +348,7 @@ def _play_nfc_prompt(uid, action, card_clip):
     card_clip = os.path.expanduser(card_clip)
     if card_clip and os.path.isfile(card_clip):
         played = subprocess.run(
-            ["aplay", "-q", "-D", SPK_DEV, card_clip], check=False
+            ["aplay", "-q", "-D", playback_device(), card_clip], check=False
         ).returncode == 0
         mode = "spoken"
     elif beeped and action in ("recognized", "selected", "enrolled"):
@@ -742,7 +732,7 @@ def ring_alert(source="new_message", settings=None):
         return
     log(f"ringing: {source}")
     log_event("ring", source=source)
-    process = subprocess.Popen(["aplay", "-q", "-D", SPK_DEV, path]) if play_ring else None
+    process = subprocess.Popen(["aplay", "-q", "-D", playback_device(), path]) if play_ring else None
     started = time.monotonic()
     try:
         while (process is not None and process.poll() is None) or (
@@ -868,7 +858,7 @@ def wait_for_confirmed_press(timeout=None):
 def play_audio_ordinary(path):
     """Play all audio and discard every press made during it."""
     subprocess.run(
-        ["aplay", "-q", "-D", SPK_DEV, str(path)],
+        ["aplay", "-q", "-D", playback_device(), str(path)],
         check=True,
         timeout=600,
     )
@@ -934,7 +924,7 @@ def wait_for_approval(timeout, session_id=None):
 def play_warning_for_approval(path, session_id=None):
     """The one playback state where a press is consumed as approval."""
     discard_held_playback_press(lambda: button.is_pressed, wait_for_stable_open)
-    process = subprocess.Popen(["aplay", "-q", "-D", SPK_DEV, str(path)])
+    process = subprocess.Popen(["aplay", "-q", "-D", playback_device(), str(path)])
     approved = False
     try:
         closed_since = None
@@ -1106,7 +1096,7 @@ def play_next_legacy():
     meta = queue_metadata(path)
     log(f"playing {names[0]} ({len(names)} waiting)")
     try:
-        subprocess.run(["aplay", "-q", "-D", SPK_DEV, str(path)], check=True, timeout=600)
+        subprocess.run(["aplay", "-q", "-D", playback_device(), str(path)], check=True, timeout=600)
         path.unlink()
         Path(str(path) + ".json").unlink(missing_ok=True)
         react_played(meta)

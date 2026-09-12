@@ -99,6 +99,9 @@ box. Updating source code does not erase the library; reimaging the microSD does
 
 ## Your customizable files
 
+Books and all other application sounds share the dashboard's
+[software volume control](audio-volume.md), which also applies during playback.
+
 | File | Purpose |
 | --- | --- |
 | `messagebox/audio_books.py` | Library, formats/size limits, NFC mapping and transient requests |

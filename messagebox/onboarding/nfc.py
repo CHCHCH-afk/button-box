@@ -17,6 +17,7 @@ import wave
 from pathlib import Path
 
 from messagebox.contacts import ContactError, ContactStore
+from messagebox.audio_volume import playback_device
 from messagebox.nfc import PN532I2CReader
 from messagebox.nfc_state import NfcError, normalize_uid
 from messagebox.onboarding.paths import NFC_ONBOARDING_SOCKET_PATH
@@ -141,7 +142,7 @@ class TonePlayer:
             sequence = [(1760, 0.08)] if kind == "read" else [(1320, 0.08), (1760, 0.11)]
             self._write_tone(path, sequence)
             os.chmod(path, 0o600)
-        device = os.environ.get("MSGBOX_SPK_DEV", "plughw:CARD=Device,DEV=0")
+        device = playback_device(run=self.run)
         self.run(
             ["aplay", "-q", "-D", device, os.fspath(path)],
             check=True,

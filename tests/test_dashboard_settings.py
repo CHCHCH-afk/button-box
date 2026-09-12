@@ -88,6 +88,33 @@ class DashboardSettingsTests(unittest.TestCase):
         self.assertEqual(code, 403)
         self.assertEqual(payload["error"], "cross-site request rejected")
 
+    def test_volume_save_applies_immediately_and_reports_hardware_failure(self):
+        _, loaded = self.request("GET", "/api/settings")
+        document = loaded["settings"]
+        candidate = {key: value for key, value in document.items() if key not in {"version", "revision"}}
+        candidate["master_volume_percent"] = 60
+        with patch.object(dashboard, "apply_volume", return_value=False) as apply:
+            code, saved = self.request("PUT", "/api/settings",
+                                       {"revision": document["revision"], "settings": candidate})
+        self.assertEqual(code, 200)
+        apply.assert_called_once_with()
+        self.assertIn("speaker", saved["volume_warning"])
+        self.assertEqual(self.store.load()[0]["master_volume_percent"], 60)
+
+    def test_failed_preview_releases_speaker_and_preview_locks(self):
+        from unittest.mock import Mock
+        from messagebox.settings import SettingsError
+
+        book_lock = Mock()
+        with patch.object(dashboard, "settings_store", return_value=self.store), \
+                patch.object(dashboard, "ringtone_path", return_value=Mock(is_file=lambda: True)), \
+                patch.object(dashboard, "audio_lock", return_value=book_lock), \
+                patch.object(dashboard, "playback_device", side_effect=OSError()):
+            with self.assertRaisesRegex(SettingsError, "Speaker unavailable"):
+                dashboard.preview_ringtone("ding_dong")
+        book_lock.close.assert_called_once()
+        self.assertFalse(dashboard.RINGTONE_PREVIEW_LOCK.locked())
+
     def test_unrecognized_dashboard_host_is_rejected(self):
         code, payload = self.request(
             "GET", "/api/settings", headers={"Host": "attacker.example"}

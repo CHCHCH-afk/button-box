@@ -11,6 +11,7 @@ import time
 import unicodedata
 from pathlib import Path
 from urllib.parse import parse_qsl
+from messagebox.audio_volume import VOLUME_WARNING, apply_volume, playback_device
 
 from messagebox.onboarding.comitup_adapter import ComitupAdapter, ComitupError
 from messagebox.onboarding.connectivity import ConnectivityChecker
@@ -695,11 +696,16 @@ def create_app(
             raise RequestError("409 Conflict", "Ringtone is unavailable")
         if not RINGTONE_PREVIEW_LOCK.acquire(blocking=False):
             raise RequestError("409 Conflict", "Button Box audio is busy")
+        try:
+            device = playback_device()
+        except OSError as exc:
+            RINGTONE_PREVIEW_LOCK.release()
+            raise RequestError("409 Conflict", "Speaker unavailable. Check its connection and try again.") from exc
 
         def play():
             try:
                 subprocess.run(
-                    ["aplay", "-q", "-D", os.environ.get("MSGBOX_SPK_DEV", "default"), os.fspath(path)],
+                    ["aplay", "-q", "-D", device, os.fspath(path)],
                     check=False,
                     timeout=30,
                 )
@@ -793,7 +799,9 @@ def create_app(
                     raise RequestError("409 Conflict", str(exc)) from exc
                 except SettingsError as exc:
                     raise RequestError("400 Bad Request", str(exc)) from exc
-                return _json_response({"settings": document, "attention": False})(start_response)
+                warning = None if apply_volume() else VOLUME_WARNING
+                return _json_response({"settings": document, "attention": False,
+                                       "volume_warning": warning})(start_response)
 
             if method == "POST" and path == "/api/ringtone-preview":
                 _require_same_origin(environ, expected_origin)

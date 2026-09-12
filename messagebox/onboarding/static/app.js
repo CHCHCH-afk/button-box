@@ -756,8 +756,39 @@ function settingsCandidate() {
   };
 }
 
+let volumeSaving = false;
+
+async function saveVolume() {
+  if (!currentSettings || volumeSaving) return;
+  volumeSaving = true;
+  const slider = document.getElementById("master-volume");
+  const submit = document.querySelector('#settings-form button[type="submit"]');
+  const status = document.getElementById("settings-status");
+  slider.disabled = submit.disabled = true;
+  const candidate = { ...currentSettings, master_volume_percent: Number(slider.value) };
+  delete candidate.version;
+  delete candidate.revision;
+  status.textContent = "Applying volume…";
+  try {
+    const payload = await request("/api/settings", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision: currentSettings.revision, settings: candidate }),
+    });
+    currentSettings = payload.settings;
+    status.textContent = payload.volume_warning || `Volume saved: ${currentSettings.master_volume_percent}%.`;
+  } catch (error) {
+    status.textContent = `${error.message} Volume change was not confirmed; reload settings before trying again.`;
+    slider.value = String(currentSettings.master_volume_percent);
+    document.getElementById("volume-output").value = `${currentSettings.master_volume_percent}%`;
+  } finally {
+    slider.disabled = submit.disabled = false;
+    volumeSaving = false;
+  }
+}
+
 async function saveSettings(event) {
   event.preventDefault();
+  if (volumeSaving) return;
   const status = document.getElementById("settings-status");
   const candidate = settingsCandidate();
   if (candidate.recording_mode === "hold_release" && currentSettings?.recording_mode !== "hold_release") {
@@ -772,7 +803,7 @@ async function saveSettings(event) {
       body: JSON.stringify({ revision: currentSettings.revision, settings: candidate }),
     });
     populateSettings(payload);
-    status.textContent = "Settings saved. Changes apply at the next idle interaction.";
+    status.textContent = payload.volume_warning || "Settings saved. Volume applies immediately, including during playback. Other changes apply at the next idle interaction.";
   } catch (error) {
     status.textContent = error.status === 409 ? `${error.message} Your unsaved choices were not overwritten.` : error.message;
   }
@@ -1211,6 +1242,7 @@ document.getElementById("settings-form").addEventListener("submit", saveSettings
 document.getElementById("master-volume").addEventListener("input", (event) => {
   document.getElementById("volume-output").value = `${event.currentTarget.value}%`;
 });
+document.getElementById("master-volume").addEventListener("change", saveVolume);
 document.getElementById("preview-ringtone").addEventListener("click", async () => {
   const status = document.getElementById("settings-status");
   status.textContent = "Playing preview…";

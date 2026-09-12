@@ -32,12 +32,12 @@ class Reader:
 
 
 class TonePlayerTests(unittest.TestCase):
-    def test_uses_complete_configured_speaker_device(self):
+    def test_uses_shared_software_volume(self):
         calls = []
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
             os.environ,
             {"MSGBOX_SPK_DEV": "plughw:CARD=speaker,DEV=2"},
-        ):
+        ), mock.patch("messagebox.onboarding.nfc.playback_device", return_value="messagebox_volume"):
             player = TonePlayer(
                 directory, run=lambda *args, **kwargs: calls.append((args, kwargs))
             )
@@ -45,7 +45,7 @@ class TonePlayerTests(unittest.TestCase):
 
         self.assertEqual(
             calls[0][0][0][0:4],
-            ["aplay", "-q", "-D", "plughw:CARD=speaker,DEV=2"],
+            ["aplay", "-q", "-D", "messagebox_volume"],
         )
 
 
