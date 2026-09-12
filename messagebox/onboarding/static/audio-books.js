@@ -103,7 +103,7 @@
       document.getElementById("books-cancel-pair").hidden = pairing?.status !== "waiting";
       const playing = data.player;
       const book = data.books.find((entry) => entry.id === playing.book);
-      document.getElementById("books-playing").textContent = playing.error || (book ? `${playing.paused ? "Paused" : "Playing"} : ${book.title}. WhatsApp notifications wait until the book ends.` : "");
+      document.getElementById("books-playing").textContent = playing.error || (book ? `${playing.paused ? "Paused" : "Playing"} : ${book.title}. ${playing.paused ? "After 5 minutes paused, the book stops and normal WhatsApp notifications resume." : "WhatsApp notifications wait until the book ends."}` : "");
       render(data.books);
     } catch (error) {
       if (!uploading) status.textContent = error.message;

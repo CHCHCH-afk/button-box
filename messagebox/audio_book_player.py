@@ -11,6 +11,8 @@ from messagebox.audio_books import BookError, BookLibrary, BookRuntime
 from messagebox.audio_volume import SOFTWARE_DEVICE, playback_device
 from messagebox.runtime_paths import RUNTIME_DIR
 
+PAUSE_TIMEOUT_SECONDS = 5 * 60
+
 
 def audio_lock(*, blocking=True):
     path = RUNTIME_DIR / "audio-book-playback.lock"
@@ -63,6 +65,7 @@ def play_pending(button, led, speaker, *, library=None, runtime=None,
             # Stop the child before another process can acquire the speaker lease.
             cleanup.callback(lambda: stop(process))
             paused = False
+            paused_at = None
             # Debounce both edges; holding a button toggles only once.
             stable = raw = bool(button.is_pressed)
             changed = clock()
@@ -74,6 +77,7 @@ def play_pending(button, led, speaker, *, library=None, runtime=None,
                     stop(process)
                     process = None
                     paused = False
+                    paused_at = None
                 if process is None:
                     path = library.path_for(key)
                     if speaker == SOFTWARE_DEVICE:
@@ -94,8 +98,11 @@ def play_pending(button, led, speaker, *, library=None, runtime=None,
                     stable = raw
                     if stable:
                         paused = not paused
+                        paused_at = now if paused else None
                         process.send_signal(signal.SIGSTOP if paused else signal.SIGCONT)
                         runtime.player(key, paused=paused)
+                if paused_at is not None and now - paused_at >= PAUSE_TIMEOUT_SECONDS:
+                    break
                 if now - heartbeat >= 1:
                     runtime.player(key, paused=paused)
                     heartbeat = now
