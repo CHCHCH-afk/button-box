@@ -39,10 +39,12 @@ class DashboardBookTests(unittest.TestCase):
         with mock.patch.object(self.library, "upload", return_value="a" * 32) as upload:
             code, data = self.post("/api/audio-books/upload", b"wave", **{
                 "Content-Type": "application/octet-stream", "X-Audio-Filename": "Livre%20court.wav",
+                "X-Audio-Upload-ID": "b" * 32,
             })
         self.assertEqual(code, 201)
         self.assertTrue(data["ok"])
         self.assertEqual(upload.call_args.args[1:], (4, "Livre court.wav"))
+        self.assertEqual(upload.call_args.kwargs, {"upload_id": "b" * 32})
 
     def test_cross_origin_upload_and_mutation_rejected_before_storage(self):
         for path in ("/api/audio-books", "/api/audio-books/upload"):

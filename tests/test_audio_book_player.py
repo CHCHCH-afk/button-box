@@ -111,3 +111,14 @@ class PlayerTests(unittest.TestCase):
         process = Process(self.clock, ends=0.1)
         self.play(lambda t: t < 0.6, lambda: next(requests, None), mock.Mock(return_value=process))
         self.assertGreaterEqual(self.clock.now, 0.8)
+
+    def test_pairing_uses_original_success_chime_and_does_not_start_book(self):
+        with mock.patch.object(self.runtime, "take_pairing_sound", return_value=True), \
+                mock.patch("messagebox.onboarding.nfc.TonePlayer") as tone, \
+                mock.patch.object(player, "audio_lock", return_value=nullcontext()) as lock:
+            popen = mock.Mock()
+            self.assertFalse(player.play_pending(mock.Mock(), self.led, "default",
+                                                runtime=self.runtime, popen=popen))
+            tone.return_value.assert_called_once_with("success")
+            lock.assert_called_once()
+            popen.assert_not_called()

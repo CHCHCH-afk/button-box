@@ -43,7 +43,10 @@ def post_books(handler, path, *, library=None, runtime=None):
             try:
                 if connection is not None:
                     connection.settimeout(60)
-                key = library.upload(handler.rfile, length, filename)
+                # Validation errors can return before consuming the request body.
+                handler.close_connection = True
+                key = library.upload(handler.rfile, length, filename,
+                                     upload_id=handler.headers.get("X-Audio-Upload-ID"))
             finally:
                 if connection is not None:
                     connection.settimeout(previous_timeout)

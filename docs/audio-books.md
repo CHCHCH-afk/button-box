@@ -114,6 +114,18 @@ the same audio lock. NFC identifiers are never returned by the library API.
 
 ## Validation before use on a physical box
 
+Uploads automatically retry connection failures, timeouts and temporary server
+errors up to three attempts, with a short delay. Each file keeps the same upload
+identifier across these attempts, so a lost success response does not create a
+second book, even if the dashboard service restarted. Invalid files and full
+storage are reported without automatic retries. After all attempts fail, check
+the library before selecting the file again; a new selection starts a new import.
+
+Successful NFC pairing queues the original two-tone setup confirmation in the
+button service. The chime plays once when the speaker is available; it does not
+interrupt an active book or start book playback. Pairing remains saved if the
+speaker fails. Pending confirmation sounds are discarded on service restart.
+
 Automated tests cover real WAV decoding (when ffmpeg is installed), corrupt and
 interrupted uploads, storage exhaustion, private mappings, conflict prevention,
 card debounce, restart/reset, paused playback replacement, button debounce,

@@ -81,6 +81,39 @@ class AudioBooksTests(unittest.TestCase):
         self.assertIsNone(self.contacts.resolve_card(CARD))
         self.assertEqual(self.library.for_card(CARD), key)
 
+    def test_retry_after_lost_response_survives_restart_without_duplicate(self):
+        raw = wav_bytes()
+        token = "b" * 32
+        key = self.library.upload(io.BytesIO(raw), len(raw), "Story.wav", upload_id=token, run=convert)
+        self.library.change(key, "rename", "Renamed")
+        restored = BookLibrary(self.library.root)
+        decoder = mock.Mock(side_effect=AssertionError("must not decode twice"))
+        self.assertEqual(restored.upload(io.BytesIO(raw), len(raw), "Story.wav", upload_id=token, run=decoder), key)
+        self.assertEqual(len(restored.public()["books"]), 1)
+        self.assertEqual(restored.public()["books"][0]["title"], "Renamed")
+        with self.assertRaises(BookError):
+            restored.upload(io.BytesIO(raw), len(raw), "Other.wav", upload_id=token, run=decoder)
+        self.assertNotIn("upload_id", json.dumps(restored.public()))
+
+    def test_retry_after_partial_upload_can_complete(self):
+        raw, token = wav_bytes(), "c" * 32
+        with self.assertRaises(BookError):
+            self.library.upload(io.BytesIO(raw[:10]), len(raw), "Story.wav", upload_id=token, run=convert)
+        key = self.library.upload(io.BytesIO(raw), len(raw), "Story.wav", upload_id=token, run=convert)
+        self.assertTrue(self.library.path_for(key).exists())
+        self.assertEqual(len(self.library.public()["books"]), 1)
+
+    def test_pairing_confirmation_is_once_only_and_only_after_success(self):
+        key = self.add_book()
+        self.runtime.begin_pair(key)
+        self.runtime.scan(CARD, self.library, self.contacts, new_presentation=True, contact_enrollment=True)
+        self.assertFalse(self.runtime.take_pairing_sound())
+        self.runtime.begin_pair(key)
+        self.runtime.scan(CARD, self.library, self.contacts, new_presentation=True)
+        self.assertTrue(self.runtime.take_pairing_sound())
+        self.runtime.scan(CARD, self.library, self.contacts, new_presentation=False)
+        self.assertFalse(self.runtime.take_pairing_sound())
+
     def test_card_reassignment_is_single_and_replaces_previous_card(self):
         one, two = self.add_book(), self.add_book("Two.mp3")
         self.library.pair(one, CARD, self.contacts)
