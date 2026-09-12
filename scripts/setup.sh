@@ -189,6 +189,10 @@ if sudo test -L "$CONFIG_DIR/env" || {
   echo "Cannot use non-regular runtime configuration: $CONFIG_DIR/env" >&2
   exit 1
 fi
+EXISTING_INSTALL=false
+if sudo test -f "$CONFIG_DIR/env" && sudo test -d "$PACKAGE_DIR"; then
+  EXISTING_INSTALL=true
+fi
 if ! sudo test -e "$CONFIG_DIR/env"; then
   GENERATED_ENV=$(mktemp)
   /usr/bin/python3 "$SCRIPT_DIR/install/audio_config.py" \
@@ -430,6 +434,30 @@ PYTHONPYCACHEPREFIX=$(mktemp -d)
 export PYTHONPYCACHEPREFIX
 (cd "$APP_DIR" && /usr/bin/python3 -m compileall -q messagebox)
 rm -rf "$PYTHONPYCACHEPREFIX"
+
+# Existing installations keep their actual hostname and completed onboarding.
+if [ "$EXISTING_INSTALL" = true ]; then
+  if [ -n "$SSH_TARGET" ]; then
+    start_command="ssh -t $SSH_TARGET sudo messageboxctl start"
+    services_command="ssh $SSH_TARGET messageboxctl services"
+  else
+    start_command="sudo messageboxctl start"
+    services_command="messageboxctl services"
+  fi
+  printf '%s\n' \
+    '' \
+    'BUTTON BOX UPDATE COMPLETE' \
+    "Detected Pi hostname: $(hostname)" \
+    'Keep using the same SSH target and dashboard address as before.' \
+    'Commands and services retain their messagebox names.' \
+    'Runtime services have not been started by this installer.' \
+    'For a previously running box, start its selected services and check them:' \
+    "  $start_command" \
+    "  $services_command" \
+    'Then verify the dashboard, WhatsApp, audio and NFC on the device.' \
+    'Do not reset Wi-Fi or repeat WhatsApp pairing for a routine update.'
+  exit 0
+fi
 
 if [ -n "$SSH_TARGET" ]; then
   dev_command="ssh -t $SSH_TARGET messagebox-dev-onboard"
