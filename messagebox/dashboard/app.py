@@ -40,6 +40,7 @@ from pathlib import Path
 from messagebox.contacts import ContactError, ContactStore, validate_contact
 from messagebox.audio_book_dashboard import get_books, post_books
 from messagebox.audio_book_player import audio_lock
+from messagebox.audio_volume import VOLUME_WARNING, apply_volume, playback_device
 from messagebox.nfc import router as nfc_router
 from messagebox.nfc_state import NfcError, active_selection
 from messagebox.runtime_paths import APP_DIR, CONTACTS_FILE, OUTBOX_DIR as DEFAULT_OUTBOX_DIR
@@ -245,11 +246,17 @@ def preview_ringtone(ringtone_id):
     except OSError as exc:
         RINGTONE_PREVIEW_LOCK.release()
         raise SettingsError("Audio Book playback is active. Wait until it finishes.") from exc
+    try:
+        device = playback_device()
+    except OSError as exc:
+        book_lock.close()
+        RINGTONE_PREVIEW_LOCK.release()
+        raise SettingsError("Speaker unavailable. Check its connection and try again.") from exc
 
     def play():
         try:
             subprocess.run(
-                ["aplay", "-q", "-D", os.environ.get("MSGBOX_SPK_DEV", "default"), os.fspath(path)],
+                ["aplay", "-q", "-D", device, os.fspath(path)],
                 check=False,
                 timeout=30,
             )
@@ -1167,7 +1174,9 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, SettingsError) as exc:
             return self._send(400, json.dumps({"ok": False, "error": str(exc)}))
         log_event(type="settings_updated", revision=document["revision"])
-        return self._send(200, json.dumps({"ok": True, "settings": document, "attention": False}))
+        warning = None if apply_volume() else VOLUME_WARNING
+        return self._send(200, json.dumps({"ok": True, "settings": document, "attention": False,
+                                          "volume_warning": warning}))
 
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)

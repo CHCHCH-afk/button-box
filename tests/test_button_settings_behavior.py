@@ -25,6 +25,12 @@ class FakeLed:
 
 
 class ButtonSettingsBehaviorTests(unittest.TestCase):
+    def test_missing_speaker_does_not_interrupt_notification_caller(self):
+        with patch.object(button_send, "playback_device", side_effect=OSError()), \
+                patch.object(button_send, "log"), patch.object(button_send.subprocess, "run") as run:
+            button_send.beep("fail")
+            run.assert_not_called()
+
     def settings(self, **changes):
         document = defaults({"TZ": "America/New_York"})
         document.update(changes)

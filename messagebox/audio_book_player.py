@@ -8,6 +8,7 @@ import time
 from contextlib import ExitStack
 
 from messagebox.audio_books import BookError, BookLibrary, BookRuntime
+from messagebox.audio_volume import SOFTWARE_DEVICE, playback_device
 from messagebox.runtime_paths import RUNTIME_DIR
 
 
@@ -66,6 +67,8 @@ def play_pending(button, led, speaker, *, library=None, runtime=None,
                     paused = False
                 if process is None:
                     path = library.path_for(key)
+                    if speaker == SOFTWARE_DEVICE:
+                        playback_device()
                     process = popen(["aplay", "-q", "-D", speaker, str(path)],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     runtime.player(key)

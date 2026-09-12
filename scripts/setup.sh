@@ -18,7 +18,7 @@ ONBOARDING_CONFIG_DIR=/etc/messagebox-onboarding
 ONBOARDING_DATA_DIR=/var/lib/messagebox-onboarding
 SETTINGS_DIR=/var/lib/messagebox-settings
 SSH_TARGET=${MESSAGEBOX_SSH_TARGET:-}
-PACKAGE_PYTHON="__init__.py audio_books.py audio_book_player.py audio_book_dashboard.py button_send.py contacts.py guided_reply.py listened_receipts.py
+PACKAGE_PYTHON="__init__.py audio_volume.py audio_books.py audio_book_player.py audio_book_dashboard.py button_send.py contacts.py guided_reply.py listened_receipts.py
 make_ringtones.py nfc.py nfc_state.py runtime_paths.py settings.py tailnet.py voicepoll.py wifi_change.py"
 DASHBOARD_PYTHON="dashboard/__init__.py dashboard/app.py"
 ONBOARDING_PYTHON="onboarding/__init__.py onboarding/app.py
@@ -49,6 +49,7 @@ for name in $PACKAGE_PYTHON $DASHBOARD_PYTHON $ONBOARDING_PYTHON $STATIC_ASSETS;
 done
 for path in \
   config/env.example \
+  config/messagebox-alsa.conf \
   config/requirements-nfc.txt \
   config/onboarding/comitup.conf.template \
   config/onboarding/comitup-dbus.conf \
@@ -271,6 +272,7 @@ sudo install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 \
   "$DATA_DIR/state" \
   "$DATA_DIR/wacli"
 
+sudo install -o root -g root -m 0644 "$REPO_DIR/config/messagebox-alsa.conf" "$APP_DIR/alsa.conf"
 for name in $PACKAGE_PYTHON $DASHBOARD_PYTHON $ONBOARDING_PYTHON; do
   sudo install -o root -g root -m 0644 \
     "$REPO_DIR/messagebox/$name" "$PACKAGE_DIR/$name"
