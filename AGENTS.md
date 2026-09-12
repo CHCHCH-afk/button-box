@@ -1,5 +1,9 @@
 # Development Guidelines
 
+For migration of an **existing installed box** to this fork, read
+[`upgrade/AGENTS.md`](upgrade/AGENTS.md) before proposing installation commands.
+That guide supplements these development rules; it does not replace them.
+
 Keep changes simple, direct, and maintainable. The goal is working software that is easy to understand, not code that demonstrates cleverness.
 
 ## Approach

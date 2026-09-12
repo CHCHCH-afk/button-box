@@ -4,6 +4,13 @@ For the personal Audio Book version, install from
 `https://github.com/CHCHCH-afk/button-box`. See [audio-books.md](audio-books.md)
 for library use, persistent storage and merging future upstream updates.
 
+**Upgrading an existing working box:** use [upgrade/AGENTS.md](../upgrade/AGENTS.md).
+The manufacturer and recipient steps below are for a fresh installation. An
+upgrade keeps the device's existing hostname (including `message-box-*`), SSH
+account, Wi-Fi and WhatsApp pairing. Repository/product names do not determine
+the SSH address. Replace all fresh-install hostname examples with the actual
+device address; do not rename a working Pi to match them.
+
 Validate installation changes on a spare Raspberry Pi 4 and microSD card. Do
 not overwrite a working device without a tested backup.
 

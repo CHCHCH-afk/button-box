@@ -5,6 +5,10 @@ books, button pause/resume, and a dashboard library with drag-and-drop imports
 stored on the microSD. WhatsApp arrival signals wait until the book finishes.
 See [Audio Book usage, installation and updates](docs/audio-books.md).
 
+**Already have a working box?** Follow the
+[AI-assisted upgrade guide](upgrade/AGENTS.md), not the fresh-card build below.
+It preserves the existing hostname, Wi-Fi, WhatsApp pairing and local library.
+
 **Button Box is a screen-free way for kids to send and receive WhatsApp voice
 messages with family on their own.**
 
@@ -93,6 +97,23 @@ This is our current reference build. Other USB speakers and microphones, and oth
 > The public product is **Button Box**. Some commands, package names, hostnames,
 > and services still use the historical internal name `messagebox`. Use those
 > exact names for now.
+> The product name is not an SSH address. An existing Pi called
+> `message-box-001` stays `message-box-001`; do not rename it or substitute
+> `button-box-001` when updating. Use the hostname or IP that actually connects.
+
+### Upgrade an existing box with an agent
+
+Give your coding agent this prompt:
+
+```text
+Upgrade my existing box to https://github.com/CHCHCH-afk/button-box.
+Read the repository's AGENTS.md and upgrade/AGENTS.md first. This is an upgrade,
+not a new installation. Discover my actual SSH target and installed version,
+preserve my hostname and all device data, select a reviewed commit containing
+the features I need, prepare a verified backup and rollback, then install and
+validate it. Tell me which checks need my physical interaction. If my Pi is
+off or I defer installation, prepare the work without contacting the Pi.
+```
 
 ### Once your parts arrive — build with an agent
 
@@ -209,7 +230,10 @@ available.
 
 ## Step 5 — Connect to and inspect the Pi
 
-Replace `admin` and the hostname below if you chose different values:
+The command below is a **fresh-image example**, not a name required by the
+software. Replace both `admin` and the hostname with the values configured on
+your Pi. Keep that same target for every SSH/provisioning command below;
+existing `message-box-*` names remain valid.
 
 ```sh
 ssh admin@button-box-001.local
