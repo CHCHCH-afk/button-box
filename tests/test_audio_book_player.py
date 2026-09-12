@@ -11,10 +11,11 @@ from messagebox.audio_books import BookRuntime
 
 class Clock:
     now = 0.0
+    limit = 8
 
     def sleep(self, delay):
         self.now += delay
-        if self.now > 8:
+        if self.now > self.limit:
             raise AssertionError("playback did not finish")
 
 
@@ -76,6 +77,52 @@ class PlayerTests(unittest.TestCase):
         self.assertIsNone(self.runtime.public()["player"]["book"])
         self.assertNotIn("position", self.runtime.path.read_text())
         self.led.on.assert_not_called()
+
+    def test_five_minute_pause_stops_child_and_returns_to_idle_without_error(self):
+        self.clock.limit = 302
+        process = Process(self.clock, ends=1000)
+        requests = iter(["a" * 32])
+        self.assertTrue(self.play(lambda t: 0.1 < t < 0.4,
+                                  lambda: next(requests, None), mock.Mock(return_value=process)))
+        self.assertGreaterEqual(self.clock.now, 300.18)
+        self.assertLess(self.clock.now, 301)
+        self.assertEqual(process.returncode, -15)
+        self.assertEqual(process.signals, [signal.SIGSTOP, signal.SIGCONT])
+        self.assertIsNone(self.runtime.public()["player"]["book"])
+        self.assertIsNone(self.runtime.public()["player"]["error"])
+
+    def test_resume_cancels_timeout_and_next_pause_gets_a_fresh_deadline(self):
+        self.clock.limit = 602
+        process = Process(self.clock, ends=1000)
+        requests = iter(["a" * 32])
+        self.play(lambda t: 0.1 < t < 0.4 or 299 < t < 299.4 or 300 < t < 300.4,
+                  lambda: next(requests, None), mock.Mock(return_value=process))
+        self.assertGreaterEqual(self.clock.now, 600.08)
+        self.assertLess(self.clock.now, 601)
+        self.assertEqual(process.signals, [signal.SIGSTOP, signal.SIGCONT, signal.SIGSTOP, signal.SIGCONT])
+
+    def test_rescan_clears_old_pause_deadline(self):
+        self.clock.limit = 302
+        processes = []
+        sent = set()
+
+        def take():
+            slot = 1 if self.clock.now >= 299 else 0
+            if slot not in sent:
+                sent.add(slot)
+                return "a" * 32
+            return None
+
+        def popen(*args, **kwargs):
+            process = Process(self.clock, ends=301 if processes else 1000)
+            processes.append(process)
+            return process
+
+        self.play(lambda t: 0.1 < t < 0.4, take, popen)
+        self.assertEqual(len(processes), 2)
+        self.assertEqual(processes[0].returncode, -15)
+        self.assertEqual(processes[1].returncode, 0)
+        self.assertGreaterEqual(self.clock.now, 301)
 
     def test_rescan_replaces_even_paused_playback_from_beginning(self):
         sent = set()

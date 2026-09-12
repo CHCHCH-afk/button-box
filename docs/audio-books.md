@@ -23,9 +23,15 @@ associated book from the beginning, including when the previous playback was
 paused. Presenting another book card replaces the current book. Position is
 never saved, and a reboot does not resume playback.
 
+After **five continuous minutes paused**, the book stops and the box returns to
+normal WhatsApp operation. Resuming before that deadline cancels the timer;
+another pause starts a fresh five-minute timer. A new NFC scan also clears the
+timer and starts the scanned book from the beginning. No position is saved.
+
 WhatsApp reception continues while a book plays or is paused. New-message
 ringing and the button's arrival lamp wait until the book ends. Existing
-arrival-signal and quiet-hours settings still apply when the book ends.
+arrival-signal and quiet-hours settings still apply when the book ends or its
+pause times out. Queued WhatsApp messages are retained in either case.
 Manual ring requests and played-receipt announcements also wait. Messages are
 not automatically played at the end: press the button to use the normal
 WhatsApp flow. The caregiver's Activity page can still inspect the queue.
