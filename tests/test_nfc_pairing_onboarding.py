@@ -1,5 +1,9 @@
 import json
 import os
+import wave
+import struct
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +11,7 @@ from unittest import mock
 
 from messagebox.contacts import ContactStore
 from messagebox.onboarding.nfc import NfcOnboardingEngine, NfcOnboardingError, TonePlayer
-from messagebox.onboarding.recipients import RecipientSetup
+from messagebox.onboarding.recipients import RecipientError, RecipientSetup
 
 
 TOKEN_A = "recipient-token-0001"
@@ -32,6 +36,25 @@ class Reader:
 
 
 class TonePlayerTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required")
+    def test_read_cue_is_long_audible_and_does_not_reuse_old_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = Path(directory) / "read-v2.wav"
+            old.write_bytes(b"stale cue")
+            calls = []
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[0] == "ffmpeg":
+                    return subprocess.run(command, **kwargs)
+
+            player = TonePlayer(directory, run=run)
+            player("read")
+            with wave.open(calls[-1][-1], "rb") as source:
+                self.assertAlmostEqual(source.getnframes() / source.getframerate(), 0.40)
+                raw = source.readframes(source.getnframes())
+                self.assertGreaterEqual(max(struct.unpack(f"<{len(raw) // 2}h", raw)), 15000)
+            self.assertEqual(old.read_bytes(), b"stale cue")
+
     def test_uses_complete_configured_speaker_device(self):
         calls = []
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
@@ -41,7 +64,7 @@ class TonePlayerTests(unittest.TestCase):
             player = TonePlayer(
                 directory, run=lambda *args, **kwargs: calls.append((args, kwargs))
             )
-            player("read")
+            player("success")
 
         self.assertEqual(
             calls[0][0][0][0:4],
@@ -154,6 +177,26 @@ class NfcPairingOnboardingTests(unittest.TestCase):
         reassigned = self.engine.assign(TOKEN_B)
         self.assertEqual(reassigned["recipient"]["label"], "Family")
         self.assertEqual(self.contacts.resolve_card("04:01:02:03")["jid"], GROUP)
+
+    def test_allow_recipient_preserves_scanned_tag_default_and_existing_mapping(self):
+        self.contacts.assign_card(PERSON, "04:01:02:03")
+        self.engine.start()
+        self.engine.observe(CARD_B)
+        before = json.loads(self.engine.state_path.read_text())
+        default = self.contacts.load()["default_recipient"]
+        self.recipients.add_phone("+15555550123")
+        # The deployed API rejects duplicates without changing the pending tag.
+        with self.assertRaisesRegex(RecipientError, "contact already exists"):
+            self.recipients.add_phone("+15555550123")
+        self.assertEqual(json.loads(self.engine.state_path.read_text()), before)
+        view = self.engine.public_state()
+        self.assertEqual(view["status"], "choose")
+        self.assertEqual(view["mapped_count"], 1)
+        added = next(r for r in view["recipients"] if r["label"] == "+15555550123")
+        self.engine.assign(added["token"])
+        self.assertEqual(self.contacts.resolve_card(CARD_B)["jid"], "15555550123@s.whatsapp.net")
+        self.assertEqual(self.contacts.resolve_card(CARD_A)["jid"], PERSON)
+        self.assertEqual(self.contacts.load()["default_recipient"], default)
 
     def test_pending_tag_resumes_then_expires_without_exposing_uid(self):
         self.engine.start()

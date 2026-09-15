@@ -293,6 +293,41 @@ class WhatsAppPairingTests(unittest.TestCase):
             engine.recipient_list(refresh=True)
         self.assertEqual(self.candidates.read_bytes(), preserved)
 
+    def test_recipient_list_excludes_the_linked_whatsapp_account(self):
+        recipient_setup = RecipientSetup(
+            state_path=self.root / "recipient-state.json",
+            contacts_path=self.root / "contacts.json",
+            events_path=self.root / "events.jsonl",
+            voice_request_path=self.root / "voice-request.json",
+            token_factory=lambda: "recipient-token-0001",
+        )
+        runner = WacliRunner(
+            chats=[
+                {"jid": "14155550123@s.whatsapp.net", "name": "This box"},
+                {"jid": "15551234567@s.whatsapp.net", "name": "Grandma"},
+            ]
+        )
+        engine = self.engine(runner=runner, recipient_setup=recipient_setup)
+        self.live_store.mkdir()
+        self.candidates.write_text(
+            json.dumps(
+                {"version": 1, "conversations": eligible_conversations(runner.chats)}
+            ),
+            encoding="utf-8",
+        )
+        engine._set_state(
+            "ready", phone_hint="WhatsApp number ending in 0123", eligible_count=2
+        )
+
+        state = engine.recipient_list()
+
+        self.assertEqual(
+            [recipient["label"] for recipient in state["recipients"]],
+            ["+15551234567"],
+        )
+        with self.assertRaisesRegex(PairingError, "recipient_matches_linked_account"):
+            engine.recipient_select_phone("+14155550123")
+
     def test_refreshed_code_auth_doctor_bootstrap_and_atomic_promotion(self):
         chats = [
             {"jid": f"{index}@g.us", "name": f"Private group {index}"}
@@ -366,6 +401,32 @@ class WhatsAppPairingTests(unittest.TestCase):
             self.assertEqual(duplicate["attempt"], first["attempt"])
             with self.assertRaisesRegex(PairingError, "pairing_already_in_progress"):
                 engine.start("+442079460123")
+
+    def test_store_conflict_is_rejected_before_phone_code_and_retry_preserves_store(self):
+        self.live_store.mkdir()
+        existing = self.live_store / "session.db"
+        existing.write_bytes(b"preserve prior store")
+        engine = self.engine()
+        with mock.patch("messagebox.onboarding.whatsapp.threading.Thread") as worker:
+            for _ in range(2):
+                state = engine.start("+14155550123")
+                self.assertEqual(state["status"], "failed")
+                self.assertEqual(state["safe_error"], "STORE_CONFLICT")
+            worker.assert_not_called()
+        self.assertEqual(engine._load_state()["attempt"], 0)
+        self.assertFalse(engine.stage.exists())
+        self.assertEqual(existing.read_bytes(), b"preserve prior store")
+
+    def test_start_rejects_interrupted_promotion_and_symlinked_destination(self):
+        engine = self.engine()
+        engine.backup.mkdir()
+        with mock.patch("messagebox.onboarding.whatsapp.threading.Thread") as worker:
+            self.assertEqual(engine.start("+14155550123")["safe_error"], "STORE_CONFLICT")
+            engine.backup.rmdir()
+            self.live_store.symlink_to(self.root / "missing")
+            self.assertEqual(engine.start("+14155550123")["safe_error"], "STORE_CONFLICT")
+            worker.assert_not_called()
+        self.assertTrue(self.live_store.is_symlink())
 
     def test_cancel_and_worker_restart_cleanup_private_staging(self):
         engine = self.engine()
@@ -564,10 +625,16 @@ class WhatsAppFrontendAndServiceContractTests(unittest.TestCase):
             "complete-view",
         ):
             self.assertIn(f'id="{view}"', html)
+        self.assertIn('id="change-test-recipient"', html)
+        self.assertIn('showView("recipients")', script)
         self.assertIn('aria-live="polite"', html)
         self.assertIn('tabindex="-1"', html)
         self.assertIn("whatsapp.pairing_code", script)
         self.assertIn("setTimeout(loadState, 1500)", script)
+        self.assertIn(
+            'currentState = await request("/api/state");\n    showError("");\n    await route();',
+            script,
+        )
         for status in (
             'case "idle"',
             'case "code_pending"',
@@ -581,7 +648,15 @@ class WhatsAppFrontendAndServiceContractTests(unittest.TestCase):
             self.assertIn(status, script)
         self.assertIn('taskStatus("Link WhatsApp", progress.whatsapp, "#whatsapp")', script)
         self.assertIn('if (routeName === "whatsapp")', script)
+        self.assertIn('routeName === "continue"', script)
+        self.assertIn('location.replace("#home")', script)
+        self.assertIn('if (routeName === "recipient-picker")', script)
+        self.assertIn('if (routeName === "recipients")', script)
+        self.assertIn('location.hash = "whatsapp"', script)
+        self.assertIn('location.hash = "recipients"', script)
         self.assertIn('applyWhatsAppState(currentState, { manage: true })', script)
+        self.assertEqual(script.count('history.replaceState(null, "", "#continue")'), 2)
+        self.assertEqual(script.count("rememberState({ recipient_setup: data })"), 2)
         self.assertIn(".focus(", script)
         self.assertIn("retry-pairing", script)
         self.assertIn("Finish account cleanup", script)
@@ -603,6 +678,10 @@ class WhatsAppFrontendAndServiceContractTests(unittest.TestCase):
         self.assertIn("formRequest(`/recipients/${action}`", script)
         self.assertIn("formRequest(`/recipients/${action}-number`", script)
         self.assertIn('formRequest("/recipients/defer")', script)
+        self.assertIn('if (["testing", "complete"].includes(data.status))', script)
+        self.assertIn(
+            'addEventListener("click", continueRecipientSetup)', script
+        )
         self.assertIn('id="manual-default-form"', html)
         self.assertIn('id="manual-allow-form"', html)
         self.assertIn('type="tel"', html)

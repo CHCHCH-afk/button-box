@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 
 from messagebox.onboarding.recipients import RecipientError, RecipientSetup
+from messagebox.onboarding.activity import setup_activity
+from messagebox.runtime_paths import STATE_DIR
 from messagebox.onboarding.paths import (
     MESSAGEBOX_HOME,
     WACLI_PATH,
@@ -228,6 +230,22 @@ def _masked_phone(document):
     return f"WhatsApp number ending in {phone[-4:]}"
 
 
+def _linked_account_jid(document):
+    if isinstance(document, dict) and isinstance(document.get("data"), dict):
+        document = document["data"]
+    if not isinstance(document, dict) or document.get("authenticated") is not True:
+        return None
+    jid = document.get("linked_jid")
+    if isinstance(jid, str):
+        jid = jid.strip().lower()
+        if _JID.fullmatch(jid) and jid.endswith("@s.whatsapp.net"):
+            return jid
+    phone = document.get("phone")
+    if isinstance(phone, str) and phone.isdigit() and phone != "0":
+        return f"{phone}@s.whatsapp.net"
+    return None
+
+
 class PairingEngine:
     """Serialize phone-code pairing and store promotion for one device."""
 
@@ -418,6 +436,11 @@ class PairingEngine:
                 raise PairingError("unlink_current_account_first")
             if state["safe_error"] == "CLEANUP_FAILED":
                 raise PairingError("cleanup_required")
+            # Reject conflicts before creating a WhatsApp link that cannot be saved.
+            try:
+                self._check_promotion_destination()
+            except (OSError, PairingError):
+                return self._set_state("failed", error="STORE_CONFLICT")
             self._pause_sync()
             self._remove_stage()
             self.stage.mkdir(mode=0o700)
@@ -510,6 +533,20 @@ class PairingEngine:
         if self._load_state()["status"] != "ready":
             raise PairingError("whatsapp_not_ready")
 
+    def _live_account_jid(self):
+        self._require_ready()
+        auth = self._run_wacli(
+            self.live_store,
+            ["--read-only", "--json", "auth", "status"],
+            timeout=15,
+        )
+        if auth.returncode != 0:
+            raise PairingError("auth_status_failed")
+        jid = _linked_account_jid(_json_document(auth.stdout))
+        if jid is None:
+            raise PairingError("not_authenticated")
+        return jid
+
     def _live_candidates(self, *, refresh=False):
         self._require_ready()
         if refresh:
@@ -551,7 +588,9 @@ class PairingEngine:
             if not isinstance(candidates, list) or eligible_conversations(candidates) != candidates:
                 raise PairingError("recipient_list_failed")
         try:
-            return self.recipients.reconcile(candidates)
+            return self.recipients.reconcile(
+                candidates, excluded_jid=self._live_account_jid()
+            )
         except RecipientError as exc:
             raise PairingError("recipient_state_failed") from exc
 
@@ -561,6 +600,9 @@ class PairingEngine:
             return self.recipients.public_state()
         except RecipientError as exc:
             raise PairingError("recipient_state_failed") from exc
+
+    def activity_state(self):
+        return setup_activity(STATE_DIR / "events.jsonl")
 
     def recipient_list(self, *, refresh=False):
         return self._live_candidates(refresh=refresh)
@@ -575,28 +617,34 @@ class PairingEngine:
     def recipient_select(self, token):
         self._require_ready()
         try:
-            return self.recipients.select_default(token)
+            return self.recipients.select_default(
+                token, excluded_jid=self._live_account_jid()
+            )
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
     def recipient_select_phone(self, phone):
         self._require_ready()
         try:
-            return self.recipients.select_phone(normalize_phone(phone))
+            return self.recipients.select_phone(
+                normalize_phone(phone), excluded_jid=self._live_account_jid()
+            )
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
     def recipient_add(self, token):
         self._require_ready()
         try:
-            return self.recipients.add(token)
+            return self.recipients.add(token, excluded_jid=self._live_account_jid())
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
     def recipient_add_phone(self, phone):
         self._require_ready()
         try:
-            return self.recipients.add_phone(normalize_phone(phone))
+            return self.recipients.add_phone(
+                normalize_phone(phone), excluded_jid=self._live_account_jid()
+            )
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
@@ -610,7 +658,9 @@ class PairingEngine:
     def recipient_default(self, token):
         self._require_ready()
         try:
-            return self.recipients.choose_default(token)
+            return self.recipients.choose_default(
+                token, excluded_jid=self._live_account_jid()
+            )
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
@@ -859,15 +909,18 @@ class PairingEngine:
         self._remove_stage()
         return True
 
-    def _promote_store(self):
+    def _check_promotion_destination(self):
         if self.backup.exists() or self.backup.is_symlink():
             raise PairingError("promotion_backup_exists")
-        if self.stage.is_symlink() or not self.stage.is_dir():
-            raise PairingError("staging_store_invalid")
         if self.live_store.is_symlink():
             raise PairingError("symlinked_store_rejected")
         if self.live_store.exists() and any(self.live_store.iterdir()):
             raise PairingError("live_store_not_empty")
+
+    def _promote_store(self):
+        self._check_promotion_destination()
+        if self.stage.is_symlink() or not self.stage.is_dir():
+            raise PairingError("staging_store_invalid")
         moved_live = False
         try:
             if self.live_store.exists():
@@ -1006,6 +1059,9 @@ class WhatsAppPairingClient:
     def recipient_state(self):
         return self._request({"action": "recipient_state"})
 
+    def activity_state(self):
+        return self._request({"action": "activity_state"})
+
     def recipient_list(self, *, refresh=False):
         return self._request(
             {"action": "recipient_list", "refresh": bool(refresh)},
@@ -1060,6 +1116,8 @@ class _PairingHandler(socketserver.StreamRequestHandler):
                 state = self.server.engine.relink()
             elif action == "recipient_state" and set(request) == {"action"}:
                 state = self.server.engine.recipient_state()
+            elif action == "activity_state" and set(request) == {"action"}:
+                state = self.server.engine.activity_state()
             elif action == "recipient_list" and set(request) == {"action", "refresh"}:
                 if not isinstance(request["refresh"], bool):
                     raise PairingError("invalid_action")
@@ -1089,6 +1147,7 @@ class _PairingHandler(socketserver.StreamRequestHandler):
                 "unlink_current_account_first",
                 "whatsapp_not_ready",
                 "recipient_setup_started",
+                "recipient_matches_linked_account",
             }:
                 error = "pairing_request_failed"
             return self._respond({"ok": False, "error": error})

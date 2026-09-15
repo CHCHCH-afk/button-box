@@ -96,6 +96,7 @@ rsync -azR \
   "$REPO_DIR/./messagebox/dashboard/app.py" \
   "$REPO_DIR/./messagebox/onboarding/__init__.py" \
   "$REPO_DIR/./messagebox/onboarding/app.py" \
+  "$REPO_DIR/./messagebox/onboarding/activity.py" \
   "$REPO_DIR/./messagebox/onboarding/comitup_adapter.py" \
   "$REPO_DIR/./messagebox/onboarding/connectivity.py" \
   "$REPO_DIR/./messagebox/onboarding/completion.py" \
@@ -108,6 +109,7 @@ rsync -azR \
   "$REPO_DIR/./messagebox/onboarding/voice_gate.py" \
   "$REPO_DIR/./messagebox/onboarding/whatsapp.py" \
   "$REPO_DIR/./messagebox/onboarding/static/app.js" \
+  "$REPO_DIR/./messagebox/onboarding/static/clipboard.js" \
   "$REPO_DIR/./messagebox/onboarding/static/index.html" \
   "$REPO_DIR/./messagebox/onboarding/static/styles.css" \
   "$REPO_DIR/./systemd/" \

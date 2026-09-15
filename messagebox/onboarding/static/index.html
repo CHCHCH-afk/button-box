@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>Button Box</title>
   <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/clipboard.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -162,7 +163,7 @@
 
     <section class="card" id="wifi-view" aria-labelledby="wifi-title" hidden>
       <p class="eyebrow">Step 1 of 2</p>
-      <h1 id="wifi-title" tabindex="-1">Choose home Wi-Fi</h1>
+      <h1 id="wifi-title" tabindex="-1">Choose Wi-Fi for your box</h1>
       <p class="lede">Select a nearby network or enter its name manually.</p>
       <div id="scan-status" class="status" role="status">Scanning for networks...</div>
       <!-- biome-ignore lint/a11y/useSemanticElements: JavaScript adds listitem roles to the network buttons. -->
@@ -182,11 +183,13 @@
           <input id="wifi-password" name="password" type="password" minlength="8" maxlength="63" autocomplete="off" autocapitalize="none" spellcheck="false" required>
         </div>
         <aside class="notice">
-          <strong>After you connect</strong>
-          <span>Rejoin home Wi-Fi and open:</span>
+          <strong>Before you connect</strong>
+          <span>Copy this address first. Connecting will close the setup hotspot and may close this page.</span>
+          <span>Then join the same Wi-Fi you selected above, even if it is a separate IoT network. Open this address in Safari or Chrome:</span>
           <code class="setup-url" id="setup-url">__MESSAGEBOX_URL__</code>
           <button type="button" id="copy-setup-url" class="secondary">Copy setup URL</button>
           <span class="field-help" id="setup-url-copy-status" role="status" aria-live="polite"></span>
+          <span class="field-help">If the setup hotspot returns, reconnect to it and check the Wi-Fi name and password.</span>
         </aside>
         <button type="submit" id="connect-wifi">Connect Button Box</button>
       </form>
@@ -313,6 +316,7 @@
         <div id="proof-replied" class="proof-row"><span aria-hidden="true">○</span> Reply sent</div>
       </div>
       <p class="status">Keep this page open while you use Button Box.</p>
+      <button type="button" class="secondary" id="change-test-recipient">Change recipient</button>
     </section>
 
     <section class="card" id="voice-success-view" aria-labelledby="voice-success-title" hidden>
@@ -374,6 +378,14 @@
       <h1 id="nfc-choose-title" tabindex="-1">Who is this tag for?</h1>
       <p class="lede">The tag is ready. You can remove it from Button Box now.</p>
       <ul id="nfc-recipient-list" class="recipient-list"></ul>
+      <form id="nfc-allow-form">
+        <h2>Allow a new recipient</h2>
+        <label for="nfc-allow-phone">International phone number</label>
+        <input id="nfc-allow-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+1 415 555 0123" aria-describedby="nfc-allow-help" required>
+        <p id="nfc-allow-help" class="field-help">Include + and the country code. Your scanned tag stays ready and your default recipient will not change. After adding, choose the recipient above.</p>
+        <button type="submit">Allow this number</button>
+        <p id="nfc-allow-status" class="field-help" role="status" aria-live="polite"></p>
+      </form>
       <button type="button" id="cancel-nfc-tag" class="secondary">Back</button>
       <p id="nfc-choose-status" class="field-help" role="status" aria-live="polite"></p>
     </section>

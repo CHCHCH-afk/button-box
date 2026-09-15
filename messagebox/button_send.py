@@ -3,6 +3,7 @@
 
 import json
 import os
+import queue
 import select
 import signal
 import subprocess
@@ -65,6 +66,9 @@ LISTENED_FALLBACK_WAV = os.environ.get(
     "MSGBOX_LISTENED_FALLBACK_WAV",
     str(APP_DIR / "sounds" / "listen-receipts" / "someone-listened.wav"),
 )
+SEND_SUCCESS_WAV = str(APP_DIR / "sounds" / "feedback" / "sent-swoosh.wav")
+send_success_notices = queue.SimpleQueue()
+
 LISTENED_POLL_S = float(os.environ.get("MSGBOX_LISTENED_POLL_S", "0.2"))
 LISTENED_RETRY_S = float(os.environ.get("MSGBOX_LISTENED_RETRY_S", "30"))
 RING_REQUEST_FILE = str(RUNTIME_DIR / "ring-request")
@@ -110,11 +114,13 @@ CONFIRM_RELEASE_S = 0.2
 LED_REFRESH_S = 0.5
 SEND_FAIL_BEEP_AT = 3
 BEEPS = {
-    "press": (str(RUNTIME_DIR / "beep-press.wav"), "1175", "0.07"),
-    "nfc": (str(RUNTIME_DIR / "beep-nfc.wav"), "1760", "0.08"),
-    "start": (str(RUNTIME_DIR / "beep-start.wav"), "880", "0.12"),
-    "sent": (str(RUNTIME_DIR / "beep-sent.wav"), "1320", "0.12"),
-    "fail": (str(RUNTIME_DIR / "beep-fail.wav"), "220", "0.6"),
+    # The press acknowledgement must survive room noise and the start of the
+    # following prompt. The old 70 ms tone at ffmpeg's default level was not
+    # audible in a real-box acoustic test.
+    "press": (str(RUNTIME_DIR / "beep-press.wav"), "880", "0.40", "12"),
+    "nfc": (str(RUNTIME_DIR / "beep-nfc.wav"), "880", "0.40", "12"),
+    "start": (str(RUNTIME_DIR / "beep-start.wav"), "880", "0.12", "0"),
+    "fail": (str(RUNTIME_DIR / "beep-fail.wav"), "220", "0.6", "0"),
 }
 
 
@@ -180,22 +186,26 @@ def apply_master_volume(settings=None):
 
 
 def make_beeps():
-    for path, frequency, duration in BEEPS.values():
-        if not os.path.exists(path):
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    f"sine=frequency={frequency}:duration={duration}",
-                    path,
-                ],
-                check=True,
-            )
+    for path, frequency, duration, gain_db in BEEPS.values():
+        # These files are generated assets, so rewrite them at startup. Keeping
+        # an existing file would silently retain an older duration or gain after
+        # a software update.
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency={frequency}:duration={duration}",
+                "-filter:a",
+                f"volume={gain_db}dB",
+                path,
+            ],
+            check=True,
+        )
 
 
 def beep(name):
@@ -543,6 +553,7 @@ def send_legacy_outbox_file(fname):
             os.remove(metadata_path)
         except FileNotFoundError:
             pass
+        send_success_notices.put(time.monotonic())
         log(f"SENT legacy {fname} (queued {wait_s}s)")
         log_event(
             "sent",
@@ -610,6 +621,7 @@ def send_guided_job(job):
             flow=job.flow_kind,
         )
         outbox_store.complete(job)
+        send_success_notices.put(time.monotonic())
         log_event(
             "sent",
             flow=job.flow_kind,
@@ -908,6 +920,26 @@ def play_pending_listened(limit=4):
     return played
 
 
+def maybe_play_send_success():
+    """The main audio owner plays accepted-send cues only while idle."""
+    if _recording or _guided_active or button.is_pressed:
+        return False
+    try:
+        accepted_at = send_success_notices.get_nowait()
+    except queue.Empty:
+        return False
+    # A late cue could be mistaken for confirmation of a newer recording.
+    if time.monotonic() - accepted_at > 30:
+        return False
+    try:
+        play_audio_ordinary(SEND_SUCCESS_WAV)
+    except (OSError, subprocess.SubprocessError):
+        # Audio failure must never turn an accepted message into a retry.
+        log_event("send_cue_unavailable")
+        return False
+    return True
+
+
 def maybe_play_pending_listened():
     """Announce new played receipts promptly whenever the speaker is idle."""
     busy = _recording or _guided_active or button.is_pressed
@@ -927,8 +959,8 @@ def wait_for_approval(timeout, session_id=None):
     return True
 
 
-def play_warning_for_approval(path, session_id=None):
-    """The one playback state where a press is consumed as approval."""
+def play_audio_for_approval(path, session_id=None, *, action="approve_warning"):
+    """Consume only a fresh deliberate press in review or deletion warning."""
     discard_held_playback_press(lambda: button.is_pressed, wait_for_stable_open)
     process = subprocess.Popen(["aplay", "-q", "-D", SPK_DEV, str(path)])
     approved = False
@@ -949,9 +981,13 @@ def play_warning_for_approval(path, session_id=None):
         if process.poll() is None:
             process.wait()
     if approved:
-        acknowledge_guided_press("approve_warning", session_id)
+        acknowledge_guided_press(action, session_id)
     wait_for_stable_open()
     return approved
+
+
+def play_warning_for_approval(path, session_id=None):
+    return play_audio_for_approval(path, session_id)
 
 
 def presence(kind, recipient):
@@ -1075,6 +1111,9 @@ class PiGuidedIO:
     def play_ordinary(self, path):
         play_audio_ordinary(path)
 
+    def play_review_for_approval(self, path):
+        return play_audio_for_approval(path, self.session_id, action="approve_review")
+
     def record(self):
         return capture_guided_recording(
             self.recipient, self.session_id, self.max_seconds
@@ -1189,7 +1228,6 @@ def record_and_send_legacy(settings=None):
         final_path = part[:-5] + f"-{held:.1f}.wav"
         bind_legacy_job_recipient(final_path, recipient)
         os.replace(part, final_path)
-        beep("sent")
     finally:
         _recording = False
 
@@ -1339,6 +1377,7 @@ def main():
         while not button.is_pressed:
             time.sleep(POLL_S)
             apply_master_volume()
+            maybe_play_send_success()
             play_pending_nfc_announcement()
             maybe_play_pending_listened()
             refresh_led()

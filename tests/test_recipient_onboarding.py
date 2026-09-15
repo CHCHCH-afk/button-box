@@ -1,9 +1,12 @@
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 from messagebox.contacts import ContactStore
+from messagebox.onboarding import recipients
 from messagebox.onboarding.recipients import RecipientError, RecipientSetup
 
 
@@ -80,8 +83,48 @@ class RecipientSetupTests(unittest.TestCase):
             json.loads(self.request_path.read_text(encoding="utf-8")),
             {"version": 1, "enabled": True},
         )
-        with self.assertRaisesRegex(RecipientError, "fixed"):
-            self.setup.select_default(token)
+        self.request_path.unlink()
+        retried = self.setup.select_default(token)
+        self.assertEqual(retried["status"], "testing")
+        self.assertEqual(
+            json.loads(self.request_path.read_text(encoding="utf-8")),
+            {"version": 1, "enabled": True},
+        )
+
+        other_token = next(
+            item["token"] for item in listed["recipients"] if item["label"] == "Family"
+        )
+        changed = self.setup.select_default(other_token)
+        self.assertEqual(changed["status"], "testing")
+        self.assertEqual(changed["default"]["label"], "Family")
+        self.assertEqual(ContactStore(self.contacts_path).allowed_jids(), (GROUP,))
+        self.assertEqual(changed["proof"], {"received": False, "played": False, "replied": False})
+
+    def test_voice_request_failure_keeps_selection_retryable(self):
+        listed = self.candidates()
+        token = next(
+            item["token"]
+            for item in listed["recipients"]
+            if item["label"] == "+15551234567"
+        )
+        original_atomic_json = recipients._atomic_json
+
+        def fail_voice_request(path, payload):
+            if Path(path) == self.request_path:
+                raise OSError("voice request unavailable")
+            return original_atomic_json(path, payload)
+
+        with mock.patch.object(recipients, "_atomic_json", side_effect=fail_voice_request):
+            with self.assertRaisesRegex(OSError, "voice request unavailable"):
+                self.setup.select_default(token)
+
+        self.assertEqual(self.setup._load()["status"], "choose")
+        retried = self.setup.select_default(token)
+        self.assertEqual(retried["status"], "testing")
+        self.assertEqual(
+            json.loads(self.request_path.read_text(encoding="utf-8")),
+            {"version": 1, "enabled": True},
+        )
 
     def test_manual_phone_can_be_selected_without_discovery(self):
         selected = self.setup.select_phone("+14155550199")
@@ -91,11 +134,41 @@ class RecipientSetupTests(unittest.TestCase):
         self.assertNotIn(SECOND_PERSON, json.dumps(selected))
         contacts = ContactStore(self.contacts_path).load()
         self.assertEqual(contacts["default_recipient"], SECOND_PERSON)
+        self.request_path.unlink()
+        retried = self.setup.select_phone("+14155550199")
+        self.assertEqual(retried["status"], "testing")
+        self.assertTrue(self.request_path.is_file())
         with self.assertRaisesRegex(RecipientError, "invalid"):
             RecipientSetup(
                 state_path=self.setup.state_path.parent / "other-state.json",
                 contacts_path=self.setup.state_path.parent / "other-contacts.json",
             ).select_phone("+0123")
+
+    def test_linked_account_is_hidden_and_rejected_as_a_recipient(self):
+        listed = self.setup.reconcile(
+            [
+                {"jid": PERSON, "label": "This box"},
+                {"jid": SECOND_PERSON, "label": "Grandma"},
+            ],
+            excluded_jid=PERSON,
+        )
+        self.assertEqual(
+            [recipient["label"] for recipient in listed["recipients"]],
+            ["+14155550199"],
+        )
+        with self.assertRaisesRegex(RecipientError, "recipient_matches_linked_account"):
+            self.setup.select_phone("+15551234567", excluded_jid=PERSON)
+
+        self.setup.reconcile([{"jid": PERSON, "label": "This box"}])
+        state = self.setup._load()
+        own_token = next(
+            token
+            for token, candidate in state["candidates"].items()
+            if candidate["jid"] == PERSON
+        )
+        with self.assertRaisesRegex(RecipientError, "recipient_matches_linked_account"):
+            self.setup.select_default(own_token, excluded_jid=PERSON)
+        self.assertIsNone(ContactStore(self.contacts_path).load()["default_recipient"])
 
     def test_receive_play_reply_proof_requires_one_exact_correlated_flow(self):
         listed = self.candidates()
@@ -276,6 +349,44 @@ class RecipientSetupTests(unittest.TestCase):
         self.setup.remove(tokens["+15551234567"])
         self.assertEqual(set(ContactStore(self.contacts_path).load()["contacts"]), {GROUP})
 
+    def test_completed_setup_picker_cannot_bypass_recipient_manager(self):
+        listed = self.candidates()
+        tokens = {item["label"]: item["token"] for item in listed["recipients"]}
+        self.setup.select_default(tokens["+15551234567"])
+        state = json.loads(self.setup.state_path.read_text(encoding="utf-8"))
+        state["status"] = "complete"
+        state["proof"].update(received=True, played=True, replied=True)
+        self.setup._write(state)
+
+        with self.assertRaisesRegex(RecipientError, "default recipient is fixed"):
+            self.setup.select_default(tokens["Family"])
+
+        contacts = ContactStore(self.contacts_path).load()
+        self.assertEqual(contacts["default_recipient"], PERSON)
+        self.assertEqual(set(contacts["contacts"]), {PERSON})
+        self.assertEqual(self.setup.public_state()["status"], "complete")
+
+    def test_rapid_manager_switches_keep_recipient_state_consistent(self):
+        listed = self.candidates()
+        tokens = {item["label"]: item["token"] for item in listed["recipients"]}
+        self.setup.select_default(tokens["+15551234567"])
+        state = json.loads(self.setup.state_path.read_text(encoding="utf-8"))
+        state["status"] = "complete"
+        state["proof"].update(received=True, played=True, replied=True)
+        self.setup._write(state)
+        self.setup.add(tokens["Family"])
+
+        choices = [tokens["Family"], tokens["+15551234567"]] * 20
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(self.setup.choose_default, choices))
+
+        contacts = ContactStore(self.contacts_path).load()
+        persisted = json.loads(self.setup.state_path.read_text(encoding="utf-8"))
+        selected = self.setup.configured_candidate(persisted["default_token"])
+        self.assertEqual(contacts["default_recipient"], selected["jid"])
+        self.assertTrue(all(result["status"] == "complete" for result in results))
+        self.assertEqual(set(contacts["contacts"]), {PERSON, GROUP})
+
     def test_manager_rejects_unconfigured_default_and_recovers_store_first_change(self):
         listed = self.candidates()
         tokens = {item["label"]: item["token"] for item in listed["recipients"]}
@@ -320,8 +431,9 @@ class RecipientSetupTests(unittest.TestCase):
         )
         self.assertTrue(manual["configured"])
         self.assertFalse(manual["is_default"])
-        with self.assertRaisesRegex(RecipientError, "already exists"):
+        with self.assertRaisesRegex(RecipientError, "contact already exists"):
             self.setup.add_phone("+14155550199")
+        self.assertEqual(ContactStore(self.contacts_path).load(), contacts)
 
     def test_defer_is_resumable_and_does_not_activate_messaging(self):
         self.candidates()

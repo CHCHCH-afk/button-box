@@ -21,11 +21,11 @@ SSH_TARGET=${MESSAGEBOX_SSH_TARGET:-}
 PACKAGE_PYTHON="__init__.py button_send.py contacts.py guided_reply.py listened_receipts.py
 make_ringtones.py nfc.py nfc_state.py runtime_paths.py settings.py tailnet.py voicepoll.py wifi_change.py"
 DASHBOARD_PYTHON="dashboard/__init__.py dashboard/app.py"
-ONBOARDING_PYTHON="onboarding/__init__.py onboarding/app.py
+ONBOARDING_PYTHON="onboarding/__init__.py onboarding/app.py onboarding/activity.py
 onboarding/comitup_adapter.py onboarding/connectivity.py onboarding/initialize.py
 onboarding/completion.py onboarding/nfc.py onboarding/paths.py onboarding/recipients.py onboarding/reset.py onboarding/state.py
 onboarding/voice_gate.py onboarding/whatsapp.py"
-STATIC_ASSETS="onboarding/static/app.js onboarding/static/index.html onboarding/static/styles.css"
+STATIC_ASSETS="onboarding/static/app.js onboarding/static/clipboard.js onboarding/static/index.html onboarding/static/styles.css"
 GUIDED_PROMPT_DIR=$REPO_DIR/sounds/guided-reply
 
 case "$SSH_TARGET" in
@@ -65,6 +65,7 @@ for path in \
   scripts/messageboxctl \
   messagebox/syncloop.sh \
   systemd/messagebox-button.service \
+  systemd/messagebox-audio-detect.service \
   systemd/messagebox-sync.service \
   systemd/messagebox-poller.service \
   systemd/messagebox-dash.service \
@@ -257,7 +258,8 @@ sudo install -d -o root -g root -m 0755 \
   "$APP_DIR/ringtones" \
   "$APP_DIR/sounds/guided-reply" \
   "$APP_DIR/sounds/listen-receipts" \
-  "$APP_DIR/sounds/nfc"
+  "$APP_DIR/sounds/nfc" \
+  "$APP_DIR/sounds/feedback"
 sudo install -d -o root -g "$SERVICE_GROUP" -m 0750 "$CONFIG_DIR"
 sudo install -d -o root -g "$ONBOARDING_GROUP" -m 0750 "$ONBOARDING_CONFIG_DIR"
 sudo install -d -o "$ONBOARDING_USER" -g "$ONBOARDING_GROUP" -m 0700 "$ONBOARDING_DATA_DIR"
@@ -305,7 +307,7 @@ sudo rm -f "$ONBOARDING_DATA_DIR/session.key"
 
 sudo install -o root -g root -m 0644 \
   "$REPO_DIR/config/requirements-nfc.txt" "$APP_DIR/config/requirements-nfc.txt"
-for directory in guided-reply listen-receipts nfc; do
+for directory in guided-reply listen-receipts nfc feedback; do
   for source in "$REPO_DIR/sounds/$directory"/*; do
     if [ -f "$source" ]; then
       sudo install -o root -g root -m 0644 "$source" "$APP_DIR/sounds/$directory/$(basename "$source")"
@@ -348,7 +350,10 @@ sudo chmod 0644 "$APP_DIR"/ringtones/*.wav
 "$SCRIPT_DIR/install/wacli.sh"
 "$SCRIPT_DIR/install/comitup.sh"
 
-for name in messagebox-button messagebox-sync messagebox-poller messagebox-dash; do
+sudo install -d -o root -g root -m 0755 /usr/lib/messagebox
+sudo install -o root -g root -m 0644 \
+  "$REPO_DIR/scripts/install/audio_config.py" /usr/lib/messagebox/audio_config.py
+for name in messagebox-button messagebox-sync messagebox-poller messagebox-dash messagebox-audio-detect; do
   sudo install -o root -g root -m 0644 \
     "$REPO_DIR/systemd/$name.service" "/etc/systemd/system/$name.service"
 done

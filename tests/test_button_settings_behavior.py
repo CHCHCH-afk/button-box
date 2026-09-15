@@ -1,4 +1,10 @@
+import math
+import os
+import shutil
+import struct
+import tempfile
 import unittest
+import wave
 import sys
 import types
 from datetime import datetime
@@ -25,6 +31,40 @@ class FakeLed:
 
 
 class ButtonSettingsBehaviorTests(unittest.TestCase):
+    def test_review_approval_requires_a_new_press_after_recording_release(self):
+        for fresh_press in (False, True):
+            with self.subTest(fresh_press=fresh_press):
+                calls = []
+                button = types.SimpleNamespace(is_pressed=True)
+                tick = [0]
+                def release():
+                    calls.append("release")
+                    button.is_pressed = False
+                def now():
+                    tick[0] += 1
+                    button.is_pressed = fresh_press and tick[0] >= 2
+                    return tick[0] * .05
+                process = types.SimpleNamespace(polls=0, stopped=False)
+                def poll():
+                    process.polls += 1
+                    return 0 if process.stopped or process.polls > 7 else None
+                def terminate():
+                    calls.append("terminate")
+                    process.stopped = True
+                process.poll = poll
+                process.terminate = terminate
+                process.wait = lambda: None
+                def spawn(*args, **kwargs):
+                    self.assertFalse(button.is_pressed)
+                    calls.append("spawn")
+                    return process
+                with patch.object(button_send, "button", button, create=True), patch.object(button_send, "wait_for_stable_open", side_effect=release), patch.object(button_send.time, "monotonic", side_effect=now), patch.object(button_send.time, "sleep"), patch.object(button_send.subprocess, "Popen", side_effect=spawn), patch.object(button_send, "acknowledge_guided_press") as acknowledge:
+                    result = button_send.play_audio_for_approval("review.wav", "test", action="approve_review")
+                self.assertEqual(result, fresh_press)
+                self.assertEqual(calls[:2], ["release", "spawn"])
+                self.assertEqual(acknowledge.call_count, int(fresh_press))
+                self.assertEqual(calls.count("terminate"), int(fresh_press))
+
     def settings(self, **changes):
         document = defaults({"TZ": "America/New_York"})
         document.update(changes)
@@ -84,6 +124,61 @@ class ButtonSettingsBehaviorTests(unittest.TestCase):
                     self.assertEqual(button_send.led.state, expected)
         finally:
             button_send.led = original_led
+
+    def test_press_acknowledgement_is_generated_audibly(self):
+        self.assertEqual(button_send.BEEPS["nfc"][1:], button_send.BEEPS["press"][1:])
+        with patch.object(button_send.subprocess, "run") as run:
+            button_send.make_beeps()
+
+        press_command = run.call_args_list[0].args[0]
+        self.assertIn("sine=frequency=880:duration=0.40", press_command)
+        self.assertIn("volume=12dB", press_command)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required")
+    def test_press_acknowledgement_waveform_meets_signal_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "press.wav")
+            with patch.object(
+                button_send,
+                "BEEPS",
+                {"press": (path, "880", "0.40", "12")},
+            ):
+                button_send.make_beeps()
+
+            with wave.open(path, "rb") as cue:
+                self.assertEqual(cue.getsampwidth(), 2)
+                sample_rate = cue.getframerate()
+                samples = struct.unpack(
+                    f"<{cue.getnframes()}h", cue.readframes(cue.getnframes())
+                )
+
+            duration_s = len(samples) / sample_rate
+            peak = max(abs(sample) for sample in samples)
+            rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+            self.assertGreaterEqual(duration_s, 0.39)
+            self.assertGreaterEqual(peak, 14000)
+            self.assertGreaterEqual(rms, 9000)
+
+            from messagebox.onboarding.nfc import TonePlayer
+            import subprocess
+
+            def run(command, **kwargs):
+                if command[0] == "ffmpeg":
+                    return subprocess.run(command, **kwargs)
+
+            TonePlayer(directory, run=run)("read")
+            with wave.open(os.path.join(directory, "read-v3.wav"), "rb") as setup_cue:
+                self.assertEqual(setup_cue.getframerate(), sample_rate)
+                self.assertEqual(setup_cue.readframes(setup_cue.getnframes()), struct.pack(f"<{len(samples)}h", *samples))
+
+    def test_press_acknowledgement_replaces_a_stale_generated_file(self):
+        with patch.object(button_send.os.path, "exists", return_value=True), patch.object(
+            button_send.subprocess, "run"
+        ) as run:
+            button_send.make_beeps()
+
+        self.assertEqual(run.call_count, len(button_send.BEEPS))
+        self.assertIn("-y", run.call_args_list[0].args[0])
 
 
 if __name__ == "__main__":
