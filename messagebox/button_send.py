@@ -3,6 +3,7 @@
 
 import json
 import os
+import queue
 import select
 import signal
 import subprocess
@@ -27,7 +28,6 @@ from messagebox.guided_reply import (
     RecordingResult,
     claim_inbox_file,
     discard_held_playback_press,
-    finish_inbox_file,
     invalid_prompt_files,
     raw_pcm_to_trimmed_wav,
     recover_inflight_files,
@@ -35,6 +35,7 @@ from messagebox.guided_reply import (
     should_ring_after_unsent_session,
     voice_send_command,
 )
+from messagebox.played_history import archive_played_file, recent_reply_recipient
 from messagebox.listened_receipts import AnnouncementGate, ReceiptStore, parse_wacli_send_id
 from messagebox.contacts import ContactError, ContactStore
 from messagebox.nfc_state import AnnouncementStore, NfcError, active_selection, claim_selection
@@ -55,7 +56,9 @@ MIC_DEV = os.environ.get("MSGBOX_MIC_DEV", "plughw:CARD=Device,DEV=0")
 SPK_DEV = SOFTWARE_DEVICE
 BUTTON_PIN = int(os.environ.get("MSGBOX_BUTTON_PIN", "17"))
 LED_PIN = int(os.environ.get("MSGBOX_LED_PIN", "26"))
-LOCK_WAIT = os.environ.get("MSGBOX_LOCK_WAIT", "60s")
+# Sync owns the store continuously. An immediate lock failure lets wacli
+# delegate supported sends to its active sync connection without delaying them.
+SEND_LOCK_WAIT = "0s"
 WACLI_BIN = "/usr/local/bin/wacli"
 QUEUE_DIR = str(DEFAULT_QUEUE_DIR)
 OUTBOX_DIR = str(DEFAULT_OUTBOX_DIR)
@@ -67,6 +70,9 @@ LISTENED_FALLBACK_WAV = os.environ.get(
     "MSGBOX_LISTENED_FALLBACK_WAV",
     str(APP_DIR / "sounds" / "listen-receipts" / "someone-listened.wav"),
 )
+SEND_SUCCESS_WAV = str(APP_DIR / "sounds" / "feedback" / "sent-swoosh.wav")
+send_success_notices = queue.SimpleQueue()
+
 LISTENED_POLL_S = float(os.environ.get("MSGBOX_LISTENED_POLL_S", "0.2"))
 LISTENED_RETRY_S = float(os.environ.get("MSGBOX_LISTENED_RETRY_S", "30"))
 RING_REQUEST_FILE = str(RUNTIME_DIR / "ring-request")
@@ -104,7 +110,10 @@ RING_PHRASE = [
     (True, 1.6),
     (False, 0.6),
 ] * 3
-MIN_HOLD_S = 0.7
+# The audible press acknowledgement doubles as the hold-intent window. A press
+# released while the cue plays remains a playback tap; a press still held when
+# it ends starts capture immediately after the speaker is quiet.
+MIN_HOLD_S = 0.4
 POLL_S = 0.005
 SETTLE_OPEN_S = 0.5
 CONFIRM_PRESS_S = 0.08
@@ -112,11 +121,13 @@ CONFIRM_RELEASE_S = 0.2
 LED_REFRESH_S = 0.5
 SEND_FAIL_BEEP_AT = 3
 BEEPS = {
-    "press": (str(RUNTIME_DIR / "beep-press.wav"), "1175", "0.07"),
-    "nfc": (str(RUNTIME_DIR / "beep-nfc.wav"), "1760", "0.08"),
-    "start": (str(RUNTIME_DIR / "beep-start.wav"), "880", "0.12"),
-    "sent": (str(RUNTIME_DIR / "beep-sent.wav"), "1320", "0.12"),
-    "fail": (str(RUNTIME_DIR / "beep-fail.wav"), "220", "0.6"),
+    # The press acknowledgement must survive room noise and the start of the
+    # following prompt. The old 70 ms tone at ffmpeg's default level was not
+    # audible in a real-box acoustic test.
+    "press": (str(RUNTIME_DIR / "beep-press.wav"), "880", "0.40", "12"),
+    "nfc": (str(RUNTIME_DIR / "beep-nfc.wav"), "880", "0.40", "12"),
+    "ready": (str(RUNTIME_DIR / "beep-ready.wav"), "1320", "0.24", "8"),
+    "fail": (str(RUNTIME_DIR / "beep-fail.wav"), "220", "0.6", "0"),
 }
 
 
@@ -169,30 +180,47 @@ def apply_master_volume(settings=None):
 
 
 def make_beeps():
-    for path, frequency, duration in BEEPS.values():
-        if not os.path.exists(path):
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    f"sine=frequency={frequency}:duration={duration}",
-                    path,
-                ],
-                check=True,
-            )
+    for path, frequency, duration, gain_db in BEEPS.values():
+        # These files are generated assets, so rewrite them at startup. Keeping
+        # an existing file would silently retain an older duration or gain after
+        # a software update.
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency={frequency}:duration={duration}",
+                "-filter:a",
+                f"volume={gain_db}dB",
+                path,
+            ],
+            check=True,
+        )
 
 
 def beep(name):
     try:
-        subprocess.run(["aplay", "-q", "-D", playback_device(), BEEPS[name][0]])
+        return subprocess.run(["aplay", "-q", "-D", playback_device(), BEEPS[name][0]])
     except (OSError, subprocess.SubprocessError):
         # Optional feedback must not stop the WhatsApp sender when USB is absent.
         log("notification sound unavailable")
+        return subprocess.CompletedProcess("aplay", 1)
+
+
+def announce_runtime_ready():
+    """Signal readiness once without making audio availability a boot gate."""
+    try:
+        result = beep("ready")
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, "aplay")
+        log_event("runtime_ready_cue")
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"runtime ready cue unavailable: {exc}")
+        log_event("runtime_ready_cue_unavailable", error=type(exc).__name__)
 
 
 def acknowledge_guided_press(action, session_id=None):
@@ -283,6 +311,77 @@ def current_recipient_context(*, claim=False):
         return None
 
 
+def claim_fresh_card_intent():
+    """Claim a fresh card selection before choosing inbound playback.
+
+    The state distinguishes no scan, an already-stale scan, a claimed valid
+    scan, and a valid scan that became invalid during the claim. Callers use
+    that distinction to preserve normal playback while failing closed for
+    outbound routing and claim races.
+    """
+    if not Path(NFC_SELECTION_FILE).exists():
+        return "none", None
+    pending = current_recipient_context(claim=False)
+    if pending is None or not pending["via_card"]:
+        # Consume stale state so it cannot keep blocking later interactions.
+        current_recipient_context(claim=True)
+        return "stale", None
+    claimed = current_recipient_context(claim=True)
+    if claimed is None or not claimed["via_card"]:
+        log_event("nfc_selection_expired")
+        return "expired", None
+    return "claimed", claimed
+
+
+def nfc_idle_routing_is_safe(contacts):
+    """Reject recent/default routing while fitted NFC state is unsafe."""
+    if not any(contact["card_uids"] for contact in contacts.values()):
+        return True
+    try:
+        if time.time() - os.stat(NFC_HEALTH_FILE).st_mtime > NFC_HEALTH_MAX_AGE_S:
+            log("recipient unavailable: NFC reader health is stale")
+            return False
+    except OSError:
+        log("recipient unavailable: NFC reader health is unavailable")
+        return False
+    if nfc_announcement_store.pending_action() in {"unknown", "invalid"}:
+        log("recipient unavailable: unrecognized card presentation")
+        return False
+    return True
+
+
+def recording_recipient_context():
+    """Prefer the exact recently played sender, then the configured default."""
+    try:
+        document = ContactStore(CONTACTS_FILE).load()
+    except (ContactError, OSError):
+        return None
+    contacts = document["contacts"]
+    # A presentation that arrives after the initial press check still owns the
+    # interaction. Invalid or unsafe card state must never fall through to a
+    # recent sender.
+    if Path(NFC_SELECTION_FILE).exists():
+        return current_recipient_context(claim=True)
+    if not nfc_idle_routing_is_safe(contacts):
+        return None
+
+    route_state, recipient = recent_reply_recipient(QUEUE_DIR, contacts)
+    if Path(NFC_SELECTION_FILE).exists():
+        return current_recipient_context(claim=True)
+    if not nfc_idle_routing_is_safe(contacts):
+        return None
+    if route_state == "route":
+        return {
+            "contact": {"jid": recipient, **contacts[recipient]},
+            "via_card": False,
+            "via_recent_reply": True,
+        }
+    if route_state == "blocked":
+        log("recipient unavailable: recent reply route is no longer valid")
+        return None
+    return current_recipient_context(claim=True)
+
+
 def routing_mode():
     """Describe startup routing without exposing a contact JID."""
     try:
@@ -302,18 +401,32 @@ def wait_for_hold_intent(
     minimum_hold_s,
     poll_s,
     *,
+    started_at=None,
     monotonic=time.monotonic,
     sleeper=time.sleep,
 ):
     """Classify the shared button before resolving or claiming a recipient."""
     if minimum_hold_s <= 0 or poll_s <= 0:
         raise ValueError("button timing values must be positive")
-    started = monotonic()
+    started = monotonic() if started_at is None else started_at
     while monotonic() - started < minimum_hold_s:
         if not is_pressed():
             return "play"
         sleeper(poll_s)
-    return "record"
+    return "record" if is_pressed() else "play"
+
+
+def acknowledge_and_classify_legacy_press(pressed_at=None):
+    """Acknowledge the initial press, then classify it after the cue ends."""
+    started = time.monotonic() if pressed_at is None else pressed_at
+    beep("press")
+    log_event("legacy_press")
+    return wait_for_hold_intent(
+        lambda: button.is_pressed,
+        MIN_HOLD_S,
+        POLL_S,
+        started_at=started,
+    )
 
 
 def prompt_for_token():
@@ -515,7 +628,7 @@ def send_legacy_outbox_file(fname):
             "--to",
             recipient,
             "--lock-wait",
-            LOCK_WAIT,
+            SEND_LOCK_WAIT,
             "--json",
         ],
         capture_output=True,
@@ -537,6 +650,7 @@ def send_legacy_outbox_file(fname):
             os.remove(metadata_path)
         except FileNotFoundError:
             pass
+        send_success_notices.put(time.monotonic())
         log(f"SENT legacy {fname} (queued {wait_s}s)")
         log_event(
             "sent",
@@ -588,7 +702,7 @@ def send_guided_job(job):
     # automatic duplicate resend.
     job = outbox_store.set_state(job, "sending", increment_attempts=True)
     sent = subprocess.run(
-        voice_send_command(WACLI_BIN, ogg, job.recipient, LOCK_WAIT),
+        voice_send_command(WACLI_BIN, ogg, job.recipient, SEND_LOCK_WAIT),
         capture_output=True,
         text=True,
     )
@@ -604,6 +718,7 @@ def send_guided_job(job):
             flow=job.flow_kind,
         )
         outbox_store.complete(job)
+        send_success_notices.put(time.monotonic())
         log_event(
             "sent",
             flow=job.flow_kind,
@@ -710,14 +825,18 @@ def maybe_ring():
 
 
 def maybe_manual_ring():
+    if not os.path.exists(RING_REQUEST_FILE):
+        return
+    # Keep the marker in place so a crash cannot lose the request and repeated
+    # dashboard taps stay idempotent until playback finishes.
+    if not ring_alert(source="dashboard"):
+        return
     try:
         os.remove(RING_REQUEST_FILE)
     except FileNotFoundError:
-        return
+        pass
     except OSError as exc:
         log(f"manual ring request error: {exc}")
-        return
-    ring_alert(source="dashboard")
 
 
 def ring_alert(source="new_message", settings=None):
@@ -729,7 +848,7 @@ def ring_alert(source="new_message", settings=None):
     flash_lamp = signal in {"ring_and_lamp", "lamp_only"}
     if play_ring and not os.path.exists(path):
         log(f"ring skipped ({source}): ringtone unavailable")
-        return
+        return False
     log(f"ringing: {source}")
     log_event("ring", source=source)
     process = subprocess.Popen(["aplay", "-q", "-D", playback_device(), path]) if play_ring else None
@@ -750,6 +869,7 @@ def ring_alert(source="new_message", settings=None):
         if process is not None and process.poll() is None:
             process.wait()
         refresh_led(force=True)
+    return process is None or process.returncode == 0
 
 
 def load_event_metadata(fname):
@@ -795,7 +915,12 @@ def claim_oldest():
 
 
 def finish_claim(claim):
-    finish_inbox_file(claim["path"])
+    archive_played_file(
+        QUEUE_DIR,
+        claim["path"],
+        metadata=claim.get("meta"),
+        played_at=claim.get("played_at"),
+    )
 
 
 def release_claim(claim):
@@ -817,7 +942,7 @@ def react_played(meta):
             "--reaction",
             "🎧",
             "--lock-wait",
-            LOCK_WAIT,
+            SEND_LOCK_WAIT,
         ]
         if meta.get("sender_jid"):
             command += ["--sender", meta["sender_jid"]]
@@ -902,6 +1027,49 @@ def play_pending_listened(limit=4):
     return played
 
 
+def play_send_success_cue():
+    """Keep one audio owner, but yield to a new press without consuming it."""
+    process = subprocess.Popen(["aplay", "-q", "-D", playback_device(), SEND_SUCCESS_WAV])
+    deadline = time.monotonic() + 5
+    try:
+        while (code := process.poll()) is None:
+            if button.is_pressed:
+                return
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("aplay", 5)
+            time.sleep(POLL_S)
+        if code:
+            raise subprocess.CalledProcessError(code, "aplay")
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=0.2)
+
+
+def maybe_play_send_success():
+    """The main audio owner plays accepted-send cues only while idle."""
+    if _recording or _guided_active or button.is_pressed:
+        return False
+    try:
+        accepted_at = send_success_notices.get_nowait()
+    except queue.Empty:
+        return False
+    # A late cue could be mistaken for confirmation of a newer recording.
+    if time.monotonic() - accepted_at > 30:
+        return False
+    try:
+        play_send_success_cue()
+    except (OSError, subprocess.SubprocessError):
+        # Audio failure must never turn an accepted message into a retry.
+        log_event("send_cue_unavailable")
+        return False
+    return True
+
+
 def maybe_play_pending_listened():
     """Announce new played receipts promptly whenever the speaker is idle."""
     busy = _recording or _guided_active or button.is_pressed
@@ -921,8 +1089,8 @@ def wait_for_approval(timeout, session_id=None):
     return True
 
 
-def play_warning_for_approval(path, session_id=None):
-    """The one playback state where a press is consumed as approval."""
+def play_audio_for_approval(path, session_id=None, *, action="approve_warning"):
+    """Consume only a fresh deliberate press in review or deletion warning."""
     discard_held_playback_press(lambda: button.is_pressed, wait_for_stable_open)
     process = subprocess.Popen(["aplay", "-q", "-D", playback_device(), str(path)])
     approved = False
@@ -943,15 +1111,19 @@ def play_warning_for_approval(path, session_id=None):
         if process.poll() is None:
             process.wait()
     if approved:
-        acknowledge_guided_press("approve_warning", session_id)
+        acknowledge_guided_press(action, session_id)
     wait_for_stable_open()
     return approved
+
+
+def play_warning_for_approval(path, session_id=None):
+    return play_audio_for_approval(path, session_id)
 
 
 def presence(kind, recipient):
     subcommand = ["typing", "--media", "audio"] if kind == "recording" else ["paused"]
     subprocess.Popen(
-        [WACLI_BIN, "presence", *subcommand, "--to", recipient, "--lock-wait", LOCK_WAIT],
+        [WACLI_BIN, "presence", *subcommand, "--to", recipient, "--lock-wait", SEND_LOCK_WAIT],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -1069,6 +1241,9 @@ class PiGuidedIO:
     def play_ordinary(self, path):
         play_audio_ordinary(path)
 
+    def play_review_for_approval(self, path):
+        return play_audio_for_approval(path, self.session_id, action="approve_review")
+
     def record(self):
         return capture_guided_recording(
             self.recipient, self.session_id, self.max_seconds
@@ -1097,8 +1272,10 @@ def play_next_legacy():
     log(f"playing {names[0]} ({len(names)} waiting)")
     try:
         subprocess.run(["aplay", "-q", "-D", playback_device(), str(path)], check=True, timeout=600)
-        path.unlink()
-        Path(str(path) + ".json").unlink(missing_ok=True)
+        played_at = time.time()
+        archive_played_file(
+            QUEUE_DIR, path, metadata=meta, played_at=played_at
+        )
         react_played(meta)
         try:
             wait_s = time.time() - int(names[0].split("-", 1)[0]) / 1000
@@ -1112,16 +1289,27 @@ def play_next_legacy():
     refresh_led(force=True)
 
 
-def record_and_send_legacy(settings=None):
+def record_and_send_legacy(settings=None, pressed_at=None):
     global _recording
     settings = settings or caregiver_settings()
     max_seconds = settings["max_recording_seconds"]
-    intent = wait_for_hold_intent(lambda: button.is_pressed, MIN_HOLD_S, POLL_S)
+    card_state, context = claim_fresh_card_intent()
+    intent = acknowledge_and_classify_legacy_press(pressed_at)
     if intent == "play":
         wait_for_stable_open()
+        if card_state in {"claimed", "expired"}:
+            # Hold-to-record still needs a hold. A quick release consumes the
+            # one-shot choice without playing an unrelated queued message or
+            # creating a near-silent recording.
+            log_event("nfc_recording_cancelled", reason="short_press")
+            return
         play_next_legacy()
         return
-    context = current_recipient_context(claim=True)
+    if card_state in {"stale", "expired"}:
+        block_unavailable_recipient()
+        return
+    if card_state == "none":
+        context = recording_recipient_context()
     if context is None:
         block_unavailable_recipient()
         return
@@ -1133,7 +1321,6 @@ def record_and_send_legacy(settings=None):
         return
     _recording = True
     led.on()
-    beep("start")
     part = os.path.join(OUTBOX_DIR, f"{int(time.time() * 1000)}.part")
     recorder = subprocess.Popen(
         [
@@ -1183,7 +1370,6 @@ def record_and_send_legacy(settings=None):
         final_path = part[:-5] + f"-{held:.1f}.wav"
         bind_legacy_job_recipient(final_path, recipient)
         os.replace(part, final_path)
-        beep("sent")
     finally:
         _recording = False
 
@@ -1192,10 +1378,18 @@ def run_guided_once(settings=None):
     global _guided_active
     settings = settings or caregiver_settings()
     session_id = uuid.uuid4().hex
-    claim = claim_oldest()
+    card_state, context = claim_fresh_card_intent()
+    if card_state == "expired":
+        block_unavailable_recipient()
+        return
+    claim = None if card_state == "claimed" else claim_oldest()
+    if card_state == "stale" and not claim:
+        block_unavailable_recipient()
+        return
     flow_kind = "reply" if claim else "standalone"
     metadata = claim["meta"] if claim else None
-    context = current_recipient_context(claim=True) if not claim else None
+    if not claim and card_state == "none":
+        context = recording_recipient_context()
     recipient = metadata.get("chat") if metadata else (
         context["contact"]["jid"] if context else None
     )
@@ -1216,6 +1410,7 @@ def run_guided_once(settings=None):
         # The message may be heard, but a reply is never guessed or rerouted.
         try:
             play_audio_ordinary(claim["path"])
+            claim["played_at"] = time.time()
             finish_claim(claim)
             log_event("guided_unroutable_inbound")
         except Exception:
@@ -1231,6 +1426,7 @@ def run_guided_once(settings=None):
             data["source_file"] = claim["path"].name
         log_event(kind, **data)
         if kind == "guided_inbound_played":
+            claim["played_at"] = time.time()
             react_played(metadata)
 
     session = GuidedSession(io, outbox_store, session_event)
@@ -1340,6 +1536,7 @@ def main():
         f"({len(queued())} queued, "
         f"{len(outbox_store.jobs()) + len(legacy_outbox_files())} unsent)"
     )
+    announce_runtime_ready()
 
     while True:
         wait_for_stable_open()
@@ -1348,6 +1545,9 @@ def main():
             apply_master_volume()
             if maybe_play_book():
                 continue
+            maybe_play_send_success()
+            if button.is_pressed:
+                break
             play_pending_nfc_announcement()
             maybe_play_pending_listened()
             refresh_led()
@@ -1373,7 +1573,7 @@ def main():
                 wait_for_stable_open()
                 run_guided_once(interaction_settings)
             else:
-                record_and_send_legacy(interaction_settings)
+                record_and_send_legacy(interaction_settings, pressed_at=closed_at)
         except Exception as exc:
             log(f"button flow error: {exc}")
             log_event(

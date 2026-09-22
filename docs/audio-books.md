@@ -79,12 +79,16 @@ git remote add upstream https://github.com/button-box/button-box.git
 make check
 ```
 
-Follow [installation.md](installation.md) and the existing README for your
-verified Pi model and SSH destination. Provisioning includes the personal
-Python modules and the Audio Book browser script. `ffmpeg` and `aplay` are
-already installed by the standard setup. No additional service, account,
-environment variable, or public network listener is added. Installation ends
-with services stopped; follow the existing activation procedure afterward.
+For an existing box, follow the [AI upgrade guide](../upgrade/AGENTS.md) and
+[bounded updates](bounded-updates.md) using this fork's exact merged commit.
+Its manifest includes the personal modules, browser script and ALSA software
+volume configuration. The updater restores previously active application
+services and retains rollback material; it preserves the library and settings.
+
+For a fresh card, follow [installation.md](installation.md) and the README for
+your verified Pi model and SSH destination. Standard setup installs `ffmpeg`
+and `aplay` and ends with services stopped. Audio Book shares the existing
+button and dashboard services and adds no public network listener.
 
 To incorporate future upstream changes into a clean local checkout of your
 personal `main` branch:

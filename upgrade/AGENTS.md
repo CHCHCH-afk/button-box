@@ -45,7 +45,7 @@ df -h / /var/lib/messagebox
 ```
 
 Check `/opt/messagebox`, `/etc/messagebox/env`, the current source checkout and
-service definitions. Record the source commit if known; otherwise record that
+service definitions. Read `/opt/messagebox/release.json` first, or the legacy `SOURCE_COMMIT` if no release record exists. Record the source commit if known; otherwise record that
 it is unknown and preserve the installed files. A checkout's HEAD is not proof
 that its files were installed. Inspect dirty Git state and preserve local
 changes; never use `reset --hard` or overwrite a personal checkout.
@@ -106,29 +106,41 @@ Reverting Git alone does not revert `/opt`, installed units or migrated state.
 
 ## 4. Install the reviewed tree
 
-These are commands **on the Pi**, from the isolated checkout of the selected
-commit, as the verified non-root sudo-capable account:
+For an existing installation, prefer the [manifest-bounded updater](../docs/bounded-updates.md).
+It updates only the reviewed installed-file manifest, preserves private state,
+records `/opt/messagebox/release.json`, and rolls back program files and service
+state automatically on failure. It includes this fork's Audio Book modules and
+software-volume configuration. Do not download upstream release packages in
+place of this fork's exact merged source tree.
+
+Generate `release-manifest.json` from that exact commit after `make check`.
+Transfer the package, verify its checksum, and extract it into a new root-owned,
+non-group-writable staging directory as described in the bounded-update guide.
+Prepare the full private backup from section 3 as well; the bounded rollback
+itself covers program files and boot selection, not private messages or books.
+If stopping services to take the private backup, restore their recorded active
+state before calling the updater so it can capture the correct restart set.
+
+Check the Pi has the expected Python, ffmpeg/ffprobe, ALSA, GPIO and NFC runtime
+dependencies. The updater does not install OS packages. Verify the existing
+microphone and speaker names before proceeding: runtime detection preserves
+configured `plughw:CARD=...,DEV=...` choices instead of switching to another
+USB device. The new detector starts before previously active audio consumers.
+
+On the Pi, replace RELEASE and BACKUP with concrete verified paths, then run:
 
 ```sh
-sudo messageboxctl stop
-./scripts/setup.sh
-```
-
-Take/verify the consistent backup after stopping services and before running
-setup; the two commands above do not create a backup. Alternatively use the
-repository's `scripts/provision.sh` from a supported computer environment with
-the verified SSH target; inspect its prerequisites first. Do not run POSIX shell
-commands directly as PowerShell commands or assume local tools are on the Pi.
-
-Setup installs to fixed paths; `git pull` alone does not update the application.
-It leaves runtime services stopped. On an existing working installation, use
-the **update** completion instructions and restore the prior service state.
-For a box whose runtime was previously active:
-
-```sh
-sudo messageboxctl start
+sudo python3 /var/lib/button-box-update/RELEASE/scripts/install/bounded_update.py apply \
+  --source-root /var/lib/button-box-update/RELEASE \
+  --manifest /var/lib/button-box-update/RELEASE/release-manifest.json \
+  --backup-dir /var/backups/button-box/BACKUP
 messageboxctl services
 ```
+
+For an older layout missing base dependencies, inspect `scripts/setup.sh` and
+prepare a specific migration with backup first. Setup leaves services stopped;
+restore only the previously active services afterward. Do not use setup merely
+for a routine application update when the bounded updater is suitable.
 
 Never reimage the card, reset Wi-Fi, initialize onboarding, relink WhatsApp,
 reassign contacts/NFC cards or clear the library as part of a routine upgrade.

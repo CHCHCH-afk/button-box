@@ -35,8 +35,16 @@ let recipientsData = null;
 let managerOpen = false;
 let nfcData = null;
 let nfcPollTimer = null;
+let runtimePairing = null;
+let runtimePairingGeneration = 0;
 let currentState = null;
 let currentSettings = null;
+
+function acceptanceControl(tag, ...caseIds) {
+  const control = document.createElement(tag);
+  control.dataset.acceptanceCase = caseIds.join(" ");
+  return control;
+}
 
 function showView(name) {
   for (const view of views) {
@@ -46,6 +54,7 @@ function showView(name) {
   if (lastView !== name) {
     lastView = name;
     document.querySelector(`#${name}-view h1`)?.focus({ preventScroll: true });
+    window.scrollTo?.({ top: 0, behavior: "instant" });
   }
 }
 
@@ -110,7 +119,7 @@ async function scanNetworks() {
     }
     status.textContent = `${data.networks.length} network${data.networks.length === 1 ? "" : "s"} found`;
     for (const network of data.networks) {
-      const button = document.createElement("button");
+      const button = acceptanceControl("button", "BB-WIFI-01");
       button.type = "button";
       button.className = "network";
       button.setAttribute("role", "listitem");
@@ -294,28 +303,109 @@ function recipientRow(recipient, actions = []) {
   const tagCopy = recipient.card_count
     ? ` · ${recipient.card_count} tag${recipient.card_count === 1 ? "" : "s"}`
     : "";
+  const identity = recipient.secondary_label && recipient.secondary_label !== recipient.label
+    ? ` · ${recipient.secondary_label}`
+    : "";
+  const metadata = recipient.metadata_status === "unavailable"
+    ? " · name unavailable — refresh WhatsApp to retry"
+    : "";
+  meta.className = "recipient-secondary";
   meta.textContent = recipient.is_default
-    ? `${recipient.kind} · default${tagCopy}`
-    : `${recipient.kind}${tagCopy}`;
+    ? `${recipient.kind} · default${identity}${metadata}${tagCopy}`
+    : `${recipient.kind}${identity}${metadata}${tagCopy}`;
   copy.append(name, meta);
   row.append(copy);
   if (actions.length) {
     const controls = document.createElement("div");
     controls.className = "recipient-actions";
     actions.forEach(({ action, label }) => {
-    const button = document.createElement("button");
+    const caseIds = {
+      "pair-card": ["BB-NFC-03"],
+      "make-default": ["BB-RECIP-07"],
+      remove: ["BB-RECIP-09", "BB-RECIP-10"],
+      allow: ["BB-RECIP-05"],
+      rename: ["BB-RECIP-11"],
+    }[action] || ["BB-RECIP-01"];
+    const button = acceptanceControl("button", ...caseIds);
     button.type = "button";
     button.className = action === "remove" ? "danger-button compact" : "compact";
     button.textContent = label;
+    if (action === "pair-card") button.disabled = Boolean(runtimePairing?.pending);
     button.addEventListener("click", () => {
       if (action === "pair-card") beginRuntimeNfc(recipient.token, recipient.label, button);
+      else if (action === "rename") beginRecipientRename(row, recipient);
       else mutateRecipient(action, recipient.token, button);
     });
       controls.append(button);
     });
     row.append(controls);
+    if (runtimePairing?.token === recipient.token) {
+      const status = document.createElement("div");
+      status.className = "card-pairing-status";
+      status.tabIndex = -1;
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      const message = document.createElement("p");
+      message.className = "card-pairing-message";
+      message.textContent = runtimePairing.message;
+      status.append(message);
+      if (runtimePairing.pending && runtimePairing.attempt) {
+        const cancel = acceptanceControl("button", "BB-NFC-03");
+        cancel.type = "button";
+        cancel.className = "secondary compact";
+        cancel.textContent = "Cancel pairing";
+        cancel.addEventListener("click", () => runtimeNfcAction("/nfc/cancel-runtime"));
+        status.append(cancel);
+      }
+      row.append(status);
+    }
   }
   return row;
+}
+
+function beginRecipientRename(row, recipient) {
+  if (row.querySelector(".recipient-rename")) return;
+  const form = document.createElement("form");
+  form.className = "recipient-rename";
+  const label = document.createElement("label");
+  label.textContent = "Name";
+  const input = document.createElement("input");
+  input.name = "name";
+  input.type = "text";
+  input.maxLength = 80;
+  input.value = recipient.label === recipient.secondary_label ? "" : recipient.label;
+  input.placeholder = "Leave empty to use the phone number";
+  label.append(input);
+  const controls = document.createElement("div");
+  controls.className = "button-row";
+  const save = acceptanceControl("button", "BB-RECIP-11");
+  save.type = "submit";
+  save.className = "compact";
+  save.textContent = "Save";
+  const cancel = acceptanceControl("button", "BB-RECIP-11");
+  cancel.type = "button";
+  cancel.className = "secondary compact";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => form.remove());
+  controls.append(save, cancel);
+  form.append(label, controls);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      recipientsData = await formRequest("/recipients/rename", {
+        token: recipient.token,
+        name: input.value,
+      });
+      renderRecipientManager(recipientsData);
+      document.getElementById("manager-status").textContent = "Name saved.";
+    } catch (error) {
+      document.getElementById("manager-status").textContent = error.message;
+      save.disabled = false;
+    }
+  });
+  row.append(form);
+  input.focus();
 }
 
 function renderRecipientPicker(data) {
@@ -345,6 +435,10 @@ function renderRecipientManager(data) {
       { action: "default", label: "Make default" },
       { action: "remove", label: "Remove" },
     );
+    if (recipient.kind === "person") actions.unshift({
+      action: "rename",
+      label: recipient.label === recipient.secondary_label ? "Add name" : "Rename",
+    });
     return recipientRow(recipient, actions);
   }));
   document.getElementById("available-recipient-list").replaceChildren(
@@ -366,10 +460,37 @@ async function loadRecipients({ refresh = false, manager = false } = {}) {
     if (manager) renderRecipientManager(data);
     else renderRecipientPicker(data);
     status.textContent = refresh ? "WhatsApp refreshed." : "";
+    if (manager && runtimePairing?.pending && runtimePairing.attempt) {
+      window.clearTimeout(nfcPollTimer);
+      nfcPollTimer = window.setTimeout(() => pollRuntimeNfc(), 0);
+    }
     return data;
   } catch (error) {
     status.textContent = error.message;
     throw error;
+  }
+}
+
+async function continueRecipientSetup() {
+  try {
+    const data = await loadRecipients();
+    if (["testing", "complete"].includes(data.status)) {
+      applyRecipientState(data);
+    } else {
+      showView("recipients");
+    }
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function changeTestRecipient() {
+  window.clearTimeout(pollTimer);
+  try {
+    await loadRecipients();
+    showView("recipients");
+  } catch (error) {
+    showError(error.message);
   }
 }
 
@@ -380,6 +501,8 @@ async function mutateRecipient(action, token, button = null) {
     const data = await formRequest(`/recipients/${action}`, { token });
     recipientsData = data;
     if (action === "select") {
+      rememberState({ recipient_setup: data });
+      history.replaceState(null, "", "#continue");
       applyRecipientState(data);
     } else {
       renderRecipientManager(data);
@@ -398,20 +521,24 @@ async function mutateRecipientNumber(event, action) {
   event.preventDefault();
   const form = event.currentTarget;
   const button = form.querySelector('button[type="submit"]');
-  const phone = new FormData(form).get("phone");
+  const fields = new FormData(form);
+  const phone = fields.get("phone");
+  const name = fields.get("name") || "";
   const manager = action === "add";
   const status = document.getElementById(manager ? "manager-status" : "recipient-status");
   button.disabled = true;
   showError("");
   status.textContent = "Saving…";
   try {
-    const data = await formRequest(`/recipients/${action}-number`, { phone });
+    const data = await formRequest(`/recipients/${action}-number`, { phone, name });
     recipientsData = data;
     form.reset();
     if (manager) {
       renderRecipientManager(data);
       status.textContent = "Number allowed.";
     } else {
+      rememberState({ recipient_setup: data });
+      history.replaceState(null, "", "#continue");
       applyRecipientState(data);
     }
   } catch (error) {
@@ -430,50 +557,85 @@ async function deferRecipients() {
   }
 }
 
+function setRuntimePairingMessage(message) {
+  document.getElementById("manager-status").textContent = message;
+  if (!runtimePairing) return;
+  runtimePairing.message = message;
+  const list = document.getElementById("configured-recipient-list");
+  const status = list.querySelector(".card-pairing-message");
+  if (status) status.textContent = message;
+}
+
 async function beginRuntimeNfc(token, label, button) {
+  if (runtimePairing?.pending) return;
+  const generation = ++runtimePairingGeneration;
+  window.clearTimeout(nfcPollTimer);
+  runtimePairing = { token, label, pending: true, message: `Starting card pairing for ${label}…` };
+  renderRecipientManager(recipientsData);
+  document.getElementById("configured-recipient-list").querySelector(".card-pairing-status")?.focus();
   button.disabled = true;
-  const status = document.getElementById("manager-status");
-  status.textContent = `Starting card pairing for ${label}…`;
   try {
-    await formRequest("/nfc/enroll", { token });
+    const result = await formRequest("/nfc/enroll", { token });
+    if (generation !== runtimePairingGeneration) return;
+    runtimePairing.attempt = result.attempt;
+    if (!result.attempt) throw new Error("Pairing was not confirmed. Try again.");
+    renderRecipientManager(recipientsData);
     document.getElementById("cancel-runtime-nfc").hidden = false;
-    status.textContent = `Hold a card over Button Box for ${label}. You have two minutes.`;
-    pollRuntimeNfc(true);
+    setRuntimePairingMessage(`Hold a card over Button Box for ${label}. You have two minutes.`);
+    pollRuntimeNfc(generation);
   } catch (error) {
-    status.textContent = error.message;
-    button.disabled = false;
+    if (generation === runtimePairingGeneration) {
+      runtimePairing.pending = false;
+      setRuntimePairingMessage(error.message);
+      renderRecipientManager(recipientsData);
+    }
   }
 }
 
-async function pollRuntimeNfc(wasWaiting = false) {
+async function pollRuntimeNfc(generation = runtimePairingGeneration) {
   window.clearTimeout(nfcPollTimer);
+  if (!runtimePairing?.attempt) return;
   try {
-    const state = await request("/api/nfc-runtime");
+    const state = await request(`/api/nfc-runtime?attempt=${encodeURIComponent(runtimePairing.attempt)}`);
+    if (generation !== runtimePairingGeneration) return;
     if (state.status === "waiting") {
-      document.getElementById("manager-status").textContent = state.healthy
-        ? `Waiting for a card for ${state.recipient}…`
-        : "Waiting for the NFC reader. Check its connection if this continues.";
-      nfcPollTimer = window.setTimeout(() => pollRuntimeNfc(true), 800);
-    } else if (wasWaiting) {
+      setRuntimePairingMessage(state.healthy
+        ? `Hold a card over Button Box for ${runtimePairing.label}. Waiting for a scan…`
+        : "Waiting for the NFC reader. Check its connection if this continues.");
+      nfcPollTimer = window.setTimeout(() => pollRuntimeNfc(generation), 800);
+    } else {
+      runtimePairing.pending = false;
       document.getElementById("cancel-runtime-nfc").hidden = true;
-      await loadRecipients({ manager: true });
-      document.getElementById("manager-status").textContent = "Card paired or reassigned.";
+      setRuntimePairingMessage(state.status === "success"
+        ? `Card linked to ${runtimePairing.label} ✓`
+        : "Pairing ended without confirmation. Try pairing the card again.");
+      const data = await request("/api/recipients");
+      if (generation === runtimePairingGeneration) renderRecipientManager(data);
     }
-  } catch (error) {
-    document.getElementById("manager-status").textContent = error.message;
+  } catch (_error) {
+    if (generation !== runtimePairingGeneration) return;
+    setRuntimePairingMessage("Cannot check pairing. Reconnecting…");
+    nfcPollTimer = window.setTimeout(() => pollRuntimeNfc(generation), 2000);
   }
 }
 
 async function runtimeNfcAction(path) {
+  ++runtimePairingGeneration;
+  window.clearTimeout(nfcPollTimer);
   const status = document.getElementById("manager-status");
   try {
     await formRequest(path);
+    if (runtimePairing) runtimePairing.pending = false;
     window.clearTimeout(nfcPollTimer);
     document.getElementById("cancel-runtime-nfc").hidden = true;
     await loadRecipients({ manager: true });
     status.textContent = path.includes("unpair") ? "Presented card unpaired." : "Card pairing cancelled.";
+    setRuntimePairingMessage(status.textContent);
   } catch (error) {
-    status.textContent = error.message;
+    setRuntimePairingMessage(error.message);
+    if (runtimePairing?.pending) {
+      nfcPollTimer = window.setTimeout(() => pollRuntimeNfc(), 2000);
+    }
   }
 }
 
@@ -484,7 +646,7 @@ function scheduleNfcPoll(active = true) {
 
 function nfcRecipientRow(recipient) {
   const row = recipientRow(recipient);
-  const button = document.createElement("button");
+  const button = acceptanceControl("button", "BB-NFC-03");
   button.type = "button";
   button.className = "compact";
   button.textContent = "Choose";
@@ -500,6 +662,32 @@ function nfcRecipientRow(recipient) {
   });
   row.append(button);
   return row;
+}
+
+async function allowNfcRecipient(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  const status = document.getElementById("nfc-allow-status");
+  if (button.disabled) return;
+  button.disabled = true;
+  status.textContent = "Saving…";
+  try {
+    // Reuse the same allowed-recipient boundary; do not select a default,
+    // restart NFC, or assign the captured tag without an explicit Choose.
+    recipientsData = await formRequest("/recipients/add-number", {
+      phone: new FormData(form).get("phone"),
+      name: new FormData(form).get("name") || "",
+    });
+    form.reset();
+    const data = await request("/api/nfc");
+    renderNfc(data);
+    status.textContent = "Number allowed. Choose it above to pair this tag.";
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderNfc(data) {
@@ -653,7 +841,7 @@ function applyState(state) {
 function taskStatus(label, status, route = "#continue") {
   const item = document.createElement("li");
   item.className = "task-row";
-  const link = document.createElement("a");
+  const link = acceptanceControl("a", "BB-SETUP-01");
   link.href = route;
   link.textContent = label;
   const badge = document.createElement("span");
@@ -695,14 +883,43 @@ function renderSetup(state) {
 
 function renderHome(state) {
   const progress = setupProgress(state);
-  const ready = [progress.wifi, progress.whatsapp, progress.recipient, progress.first_message]
-    .every((status) => status === "complete");
+  const runtimeRunning = state.mode === "RUNTIME" && state.health?.runtime === "running";
+  const ready = runtimeRunning
+    && [progress.wifi, progress.whatsapp, progress.recipient, progress.first_message]
+      .every((status) => status === "complete");
   document.getElementById("home-attention").hidden = ready;
+  document.getElementById("home-summary").textContent = ready && state.mode === "RUNTIME"
+    ? "Connected and set up for voice messages. Say hello to someone you love."
+    : "A few small steps to bring your people closer. Pick up where you left off.";
   document.getElementById("home-wifi").textContent = progress.wifi === "complete"
     ? `Connected${state.health?.network_name ? ` · ${state.health.network_name}` : ""}`
     : "Needs attention";
   document.getElementById("home-whatsapp").textContent = progress.whatsapp === "complete" ? "Linked" : "Needs attention";
-  document.getElementById("home-runtime").textContent = state.mode === "RUNTIME" && ready ? "Ready" : "Setup in progress";
+  document.getElementById("home-runtime").textContent = state.mode === "RUNTIME"
+    ? (ready ? "Ready" : "Needs attention")
+    : "Setup in progress";
+  for (const [id, complete] of [
+    ["home-wifi", progress.wifi === "complete"],
+    ["home-whatsapp", progress.whatsapp === "complete"],
+    ["home-runtime", ready && state.mode === "RUNTIME"],
+  ]) {
+    const tile = document.getElementById(id).parentElement;
+    tile.classList.toggle("good", complete);
+    tile.classList.toggle("attention", !complete);
+  }
+}
+
+function renderIdentity(state) {
+  const id = typeof state.box_id === "string" && /^BOX-[1-9][0-9]{0,8}$/.test(state.box_id)
+    ? state.box_id : null;
+  const label = document.getElementById("box-id");
+  const button = document.getElementById("copy-box-id");
+  if (label.textContent !== (id || "Not assigned")) {
+    button.textContent = "Copy";
+    document.getElementById("box-id-status").textContent = "";
+  }
+  label.textContent = id || "Not assigned";
+  button.disabled = !id;
 }
 
 function populateSettings(payload) {
@@ -818,7 +1035,7 @@ function activityMessageList(items, kind) {
   const container = document.createElement("div");
   container.className = "activity-list";
   if (!items.length) {
-    container.textContent = kind === "queue" ? "Nothing waiting." : "Empty.";
+    container.textContent = kind === "queue" ? "Nothing waiting." : kind === "played" ? "Nothing played recently." : "Empty.";
     return container;
   }
   for (const item of items) {
@@ -826,25 +1043,33 @@ function activityMessageList(items, kind) {
     row.className = "activity-row";
     const copy = document.createElement("div");
     const title = document.createElement("strong");
-    title.textContent = `${item.sender} · ${item.chat}`;
+    const mediaLabel = kind === "played" ? item.media_kind === "video_soundtrack" ? "Video soundtrack · " : "Voice message · " : "";
+    title.textContent = `${mediaLabel}${item.sender} · ${item.chat}`;
     const meta = document.createElement("span");
-    meta.textContent = `${new Date(item.ts * 1000).toLocaleString()} · ${formatDuration(item.dur)}`;
+    const timeLabel = kind === "played" ? "Played " : "";
+    meta.textContent = `${timeLabel}${new Date(item.ts * 1000).toLocaleString()} · ${formatDuration(item.dur)}`;
     copy.append(title, meta);
     const audio = document.createElement("audio");
     audio.controls = true;
     audio.preload = "none";
-    const query = kind === "hold" ? "?hold=1" : kind === "trash" ? "?trash=1" : "";
-    audio.src = `/audio/${encodeURIComponent(item.token)}${query}`;
+    const query = kind === "played" ? "?played=1" : kind === "hold" ? "?hold=1" : kind === "trash" ? "?trash=1" : "";
+    if (kind !== "played" || item.available) audio.src = `/audio/${encodeURIComponent(item.token)}${query}`;
     const actions = document.createElement("div");
     actions.className = "button-row";
     const operations = kind === "queue" ? [["hold", "Hold"], ["delete", "Trash"]]
-      : kind === "hold" ? [["resume", "Reinstate"]] : [["reinstate", "Reinstate"]];
+      : kind === "hold" ? [["resume", "Reinstate"]]
+        : kind === "played" ? [["requeue", item.queued ? "In queue" : item.available ? "Add to queue" : "Unavailable"]]
+          : [["reinstate", "Reinstate"]];
     for (const [operation, label] of operations) {
-      const button = document.createElement("button");
+      const button = acceptanceControl("button", kind === "played" ? "BB-RQ-001" : "BB-ACT-02");
       button.type = "button";
       button.className = "secondary compact";
       button.textContent = label;
-      button.addEventListener("click", () => moveMessage(operation, item.token));
+      button.disabled = kind === "played" && (item.queued || !item.available);
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        await moveMessage(operation, item.token);
+      });
       actions.append(button);
     }
     row.append(copy, audio, actions);
@@ -863,10 +1088,6 @@ async function moveMessage(operation, token) {
 }
 
 async function loadActivity() {
-  if (currentState?.mode !== "RUNTIME") {
-    document.getElementById("activity-timeline").textContent = "Activity becomes available after setup is complete.";
-    return;
-  }
   try {
     const data = await request("/api/data");
     const cards = [["Sent", data.cards.sent_total], ["Received", data.cards.recv_total], ["Played", data.cards.plays], ["Rings", data.cards.rings]];
@@ -881,10 +1102,12 @@ async function loadActivity() {
     timeline.replaceChildren(...data.interactions.map((item) => {
       const row = document.createElement("article"); row.className = "activity-row";
       const title = document.createElement("strong"); title.textContent = item.outcome_label;
-      const meta = document.createElement("span"); meta.textContent = `${item.flow === "standalone" ? "New message" : "Reply"} · ${new Date(item.ts * 1000).toLocaleString()}`;
+      const meta = document.createElement("span"); meta.textContent = `${item.flow === "standalone" ? "New message · " : item.flow === "reply" ? "Reply · " : ""}${new Date(item.ts * 1000).toLocaleString()}`;
       row.append(title, meta); return row;
     }));
+    if (!data.interactions.length) timeline.textContent = "No activity yet. Events will appear here as you use Button Box.";
     document.getElementById("activity-queue").replaceChildren(activityMessageList(data.queue, "queue"));
+    document.getElementById("activity-played").replaceChildren(activityMessageList(data.recently_played, "played"));
     document.getElementById("activity-hold").replaceChildren(activityMessageList(data.hold, "hold"));
     document.getElementById("activity-trash").replaceChildren(activityMessageList(data.trash, "trash"));
   } catch (error) {
@@ -896,7 +1119,9 @@ async function loadAdvanced() {
   const health = document.getElementById("advanced-health");
   health.replaceChildren();
   const runtime = document.createElement("div"); runtime.className = "status-card";
-  runtime.innerHTML = `<span>Runtime</span><strong>${currentState?.mode === "RUNTIME" ? "Running" : "Setup mode"}</strong>`;
+  const runtimeStatus = currentState?.mode !== "RUNTIME" ? "Setup mode"
+    : currentState.health?.runtime === "running" ? "Running" : "Needs attention";
+  runtime.innerHTML = `<span>Runtime</span><strong>${runtimeStatus}</strong>`;
   const version = document.createElement("div"); version.className = "status-card";
   const versionLabel = document.createElement("span"); versionLabel.textContent = "Software";
   const versionValue = document.createElement("strong"); versionValue.textContent = currentState?.health?.software_version || "Installed";
@@ -914,14 +1139,14 @@ async function loadAdvanced() {
       const name = document.createElement("strong"); name.textContent = profile.name;
       const meta = document.createElement("span"); meta.textContent = profile.listened_clip ? "Custom listened sound" : "Default listened sound";
       const actions = document.createElement("div"); actions.className = "button-row";
-      const edit = document.createElement("button"); edit.type = "button"; edit.className = "secondary compact"; edit.textContent = "Edit";
+      const edit = acceptanceControl("button", "BB-ADV-01"); edit.type = "button"; edit.className = "secondary compact"; edit.textContent = "Edit";
       edit.addEventListener("click", () => {
         document.getElementById("listener-jid").value = jid;
         document.getElementById("listener-name").value = profile.name;
         document.getElementById("listener-clip").value = profile.listened_clip || "";
         document.getElementById("listener-name").focus();
       });
-      const remove = document.createElement("button"); remove.type = "button"; remove.className = "danger-button compact"; remove.textContent = "Remove";
+      const remove = acceptanceControl("button", "BB-ADV-01"); remove.type = "button"; remove.className = "danger-button compact"; remove.textContent = "Remove";
       remove.addEventListener("click", () => mutateListener({ action: "remove", jid }));
       actions.append(edit, remove);
       row.append(name, meta, actions); return row;
@@ -987,25 +1212,43 @@ async function ringNow() {
   }
   try {
     await request("/api/ring", { method: "POST" });
-    status.textContent = "Ring requested.";
+    status.textContent = "Ringtone requested. Listen for it when the box is idle.";
   } catch (error) {
     status.textContent = error.message;
   }
 }
 
 async function route() {
+  renderIdentity(currentState);
   const routeName = location.hash.slice(1) || "home";
+  const navRoute = ["continue", "whatsapp", "recipient-picker", "recipients"].includes(routeName)
+    ? (currentState.mode === "RUNTIME" ? "advanced" : "setup") : routeName;
   document.querySelectorAll("[data-route]").forEach((link) => {
-    link.setAttribute("aria-current", link.dataset.route === routeName ? "page" : "false");
+    link.setAttribute("aria-current", link.dataset.route === navRoute ? "page" : "false");
   });
   window.clearTimeout(pollTimer);
   window.clearTimeout(nfcPollTimer);
+  if (currentState.mode === "RUNTIME" && routeName === "continue") {
+    location.replace("#home");
+    return;
+  }
   if (routeName === "whatsapp") {
     if (currentState.mode === "RUNTIME") {
       await loadRuntimeWhatsApp();
     } else {
       applyWhatsAppState(currentState, { manage: true });
     }
+    return;
+  }
+  if (routeName === "recipient-picker") {
+    await loadRecipients();
+    showView("recipients");
+    return;
+  }
+  if (routeName === "recipients") {
+    managerOpen = true;
+    await loadRecipients({ manager: true });
+    showView("recipient-manager");
     return;
   }
   if (routeName === "continue") {
@@ -1027,6 +1270,7 @@ async function loadState() {
   loadingState = true;
   try {
     currentState = await request("/api/state");
+    showError("");
     await route();
   } catch (error) {
     showError(error.message);
@@ -1040,7 +1284,10 @@ async function loadState() {
 async function pairWhatsApp(event) {
   event.preventDefault();
   const button = event.currentTarget.querySelector('button[type="submit"]');
+  const label = button.textContent;
   button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  button.textContent = "Working…";
   showError("");
   try {
     const phone = document.getElementById("whatsapp-phone").value;
@@ -1050,6 +1297,8 @@ async function pairWhatsApp(event) {
     document.getElementById("whatsapp-phone").focus();
   } finally {
     button.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.textContent = label;
   }
 }
 
@@ -1064,20 +1313,11 @@ async function cancelPairing() {
 
 async function copyText(text, button, status, successMessage) {
   try {
-    if (window.isSecureContext && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const field = document.createElement("textarea");
-      field.value = text;
-      field.readOnly = true;
-      field.style.position = "fixed";
-      field.style.opacity = "0";
-      document.body.append(field);
-      field.select();
-      const copied = document.execCommand("copy");
-      field.remove();
-      if (!copied) throw new Error("copy unavailable");
-    }
+    await window.ButtonBoxClipboard.copyText(text, {
+      secure: window.isSecureContext,
+      clipboard: navigator.clipboard,
+      document,
+    });
     button.textContent = "Copied";
     status.textContent = successMessage;
   } catch (error) {
@@ -1180,40 +1420,24 @@ document.getElementById("keep-account").addEventListener("click", () => {
   document.getElementById("show-unlink").focus();
 });
 document.getElementById("unlink-form").addEventListener("submit", unlinkWhatsApp);
-document.getElementById("continue-recipients").addEventListener("click", async () => {
-  try {
-    await loadRecipients();
-    showView("recipients");
-  } catch (error) {
-    showError(error.message);
-  }
+document.getElementById("continue-recipients").addEventListener("click", () => {
+  location.hash = "recipient-picker";
 });
 document.getElementById("refresh-recipients").addEventListener("click", () => loadRecipients({ refresh: true }));
 document.getElementById("defer-recipients").addEventListener("click", deferRecipients);
 document.getElementById("manual-default-form").addEventListener("submit", (event) => {
   mutateRecipientNumber(event, "select");
 });
-document.getElementById("resume-recipients").addEventListener("click", async () => {
-  try {
-    await loadRecipients();
-    showView("recipients");
-  } catch (error) {
-    showError(error.message);
-  }
-});
+document.getElementById("resume-recipients").addEventListener("click", continueRecipientSetup);
+document.getElementById("change-test-recipient").addEventListener("click", changeTestRecipient);
 document.getElementById("open-recipient-manager").addEventListener("click", async () => {
-  managerOpen = true;
-  try {
-    await loadRecipients({ manager: true });
-    showView("recipient-manager");
-  } catch (error) {
-    showError(error.message);
-  }
+  location.hash = "recipients";
 });
 document.getElementById("manager-refresh").addEventListener("click", () => loadRecipients({ refresh: true, manager: true }));
 document.getElementById("manual-allow-form").addEventListener("submit", (event) => {
   mutateRecipientNumber(event, "add");
 });
+document.getElementById("nfc-allow-form").addEventListener("submit", allowNfcRecipient);
 document.getElementById("continue-nfc").addEventListener("click", () => {
   if (currentState?.mode === "RUNTIME") {
     document.getElementById("manager-status").textContent = "Choose Pair card beside a recipient.";
@@ -1258,6 +1482,16 @@ document.getElementById("preview-ringtone").addEventListener("click", async () =
   }
 });
 document.getElementById("ring-now").addEventListener("click", ringNow);
+document.getElementById("copy-box-id").addEventListener("click", () => {
+  const button = document.getElementById("copy-box-id");
+  if (button.disabled) return;
+  return copyText(document.getElementById("box-id").textContent, button,
+    document.getElementById("box-id-status"), "Box ID copied.");
+});
+document.getElementById("skip-link").addEventListener("click", (event) => {
+  event.preventDefault();
+  document.getElementById("main").focus();
+});
 document.getElementById("listener-form").addEventListener("submit", saveListener);
 document.getElementById("wifi-change-form").addEventListener("submit", changeWifi);
 document.querySelectorAll('[name="new_wifi_security"]').forEach((radio) => {
@@ -1269,17 +1503,15 @@ document.querySelectorAll('[name="new_wifi_security"]').forEach((radio) => {
     if (!protectedNetwork) password.value = "";
   });
 });
-document.getElementById("manage-whatsapp").addEventListener("click", loadRuntimeWhatsApp);
+document.getElementById("manage-whatsapp").addEventListener("click", () => {
+  location.hash = "whatsapp";
+});
 document.getElementById("manage-recipients").addEventListener("click", async () => {
-  managerOpen = true;
-  try {
-    await loadRecipients({ manager: true });
-    showView("recipient-manager");
-  } catch (error) {
-    showError(error.message);
-  }
+  location.hash = "recipients";
 });
 window.addEventListener("hashchange", () => {
-  if (currentState) route();
+  // Completion replaces the setup server with runtime. A cached HOME state
+  // must not keep navigation (including Activity) stuck in the old mode.
+  loadState();
 });
 loadState();

@@ -1,13 +1,18 @@
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from urllib.parse import urlencode
+from unittest import mock
+
+from unittest.mock import patch
 
 from messagebox.onboarding.app import create_app
 from messagebox.onboarding.comitup_adapter import ComitupError
 from messagebox.onboarding.state import PROOFS, WHATSAPP_PROOFS, StateStore
+from messagebox.onboarding.whatsapp import PairingError
 from messagebox.settings import SettingsStore
 
 
@@ -149,16 +154,26 @@ class FakeWhatsApp:
         self.calls.append(("recipient_select", token))
         return self.recipient_state()
 
-    def recipient_select_phone(self, phone):
-        self.calls.append(("recipient_select_phone", phone))
+    def recipient_select_phone(self, phone, name=None):
+        call = (
+            ("recipient_select_phone", phone, name)
+            if name is not None
+            else ("recipient_select_phone", phone)
+        )
+        self.calls.append(call)
         return self.recipient_state()
 
     def recipient_add(self, token):
         self.calls.append(("recipient_add", token))
         return self.recipient_state()
 
-    def recipient_add_phone(self, phone):
-        self.calls.append(("recipient_add_phone", phone))
+    def recipient_add_phone(self, phone, name=None):
+        call = (
+            ("recipient_add_phone", phone, name)
+            if name is not None
+            else ("recipient_add_phone", phone)
+        )
+        self.calls.append(call)
         return self.recipient_state()
 
     def recipient_remove(self, token):
@@ -167,6 +182,10 @@ class FakeWhatsApp:
 
     def recipient_default(self, token):
         self.calls.append(("recipient_default", token))
+        return self.recipient_state()
+
+    def recipient_rename(self, token, name):
+        self.calls.append(("recipient_rename", token, name))
         return self.recipient_state()
 
 
@@ -292,6 +311,9 @@ def header(response, name):
 
 class OnboardingAPITests(unittest.TestCase):
     def setUp(self):
+        volume = patch("messagebox.onboarding.app.playback_device", return_value="messagebox_volume")
+        volume.start()
+        self.addCleanup(volume.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.clock = Clock()
         self.state_path = Path(self.directory.name) / "state.json"
@@ -317,6 +339,59 @@ class OnboardingAPITests(unittest.TestCase):
 
     def tearDown(self):
         self.directory.cleanup()
+
+    def test_ringtone_preview_reports_speaker_success_and_failure(self):
+        ringtone = Path(self.directory.name) / "ringtone.wav"
+        ringtone.touch()
+        request = {"ringtone_id": "ding_dong"}
+        headers = {"Origin": f"http://{HOST}"}
+        with patch(
+            "messagebox.onboarding.app.ringtone_path", return_value=ringtone
+        ), patch("messagebox.onboarding.app.subprocess.run") as run:
+            response = self.client.json(
+                "POST", "/api/ringtone-preview", request, headers=headers
+            )
+
+        self.assertEqual(response["status"], "200 OK")
+        self.assertTrue(run.call_args.kwargs["check"])
+
+        with patch(
+            "messagebox.onboarding.app.ringtone_path", return_value=ringtone
+        ), patch(
+            "messagebox.onboarding.app.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["aplay"]),
+        ):
+            response = self.client.json(
+                "POST", "/api/ringtone-preview", request, headers=headers
+            )
+
+        self.assertEqual(response["status"], "503 Service Unavailable")
+        self.assertEqual(
+            json.loads(response["body"])["error"],
+            "Button Box audio could not play",
+        )
+
+    def test_ringtone_preview_timeout_releases_lock_for_retry(self):
+        ringtone = Path(self.directory.name) / "ringtone.wav"
+        ringtone.touch()
+        request = {"ringtone_id": "ding_dong"}
+        headers = {"Origin": f"http://{HOST}"}
+        timeout = subprocess.TimeoutExpired(["aplay"], 30)
+        with patch(
+            "messagebox.onboarding.app.ringtone_path", return_value=ringtone
+        ), patch(
+            "messagebox.onboarding.app.subprocess.run", side_effect=[timeout, None]
+        ) as run:
+            failed = self.client.json(
+                "POST", "/api/ringtone-preview", request, headers=headers
+            )
+            retried = self.client.json(
+                "POST", "/api/ringtone-preview", request, headers=headers
+            )
+
+        self.assertEqual(failed["status"], "503 Service Unavailable")
+        self.assertEqual(retried["status"], "200 OK")
+        self.assertEqual(run.call_count, 2)
 
     def home_pairing_client(
         self, whatsapp=None, nfc=None, completion_request=None, tailscale_host=None
@@ -354,7 +429,7 @@ class OnboardingAPITests(unittest.TestCase):
     def test_root_is_local_asset_page_with_security_headers(self):
         response = self.client.request("GET", "/")
         self.assertEqual(response["status"], "200 OK")
-        self.assertIn(b"Choose home Wi-Fi", response["body"])
+        self.assertIn(b"Choose Wi-Fi for your box", response["body"])
         self.assertIn(f"http://{HOST}/".encode(), response["body"])
         self.assertNotIn(b"__MESSAGEBOX_URL__", response["body"])
         self.assertIsNone(header(response, "Set-Cookie"))
@@ -362,6 +437,14 @@ class OnboardingAPITests(unittest.TestCase):
         self.assertEqual(header(response, "X-Frame-Options"), "DENY")
         self.assertNotIn(b"<style", response["body"])
         self.assertNotIn(b"<script>", response["body"])
+
+    def test_clipboard_asset_is_served_by_setup_and_runtime(self):
+        from messagebox.dashboard.app import DASHBOARD_STATIC
+
+        response = self.client.request("GET", "/static/clipboard.js")
+        self.assertEqual(response["status"], "200 OK")
+        self.assertIn(b"ButtonBoxClipboard", response["body"])
+        self.assertEqual(response["body"], DASHBOARD_STATIC["/static/clipboard.js"][0])
 
     def test_button_box_canonical_hostname_is_supported_and_enforced(self):
         canonical_host = "button-box-a7.local"
@@ -562,6 +645,14 @@ class OnboardingAPITests(unittest.TestCase):
         self.assertEqual(response["status"], "200 OK")
         self.assertEqual(json.loads(response["body"])["networks"], self.adapter.networks)
 
+    def test_state_includes_assigned_identity_or_explicitly_unassigned(self):
+        with mock.patch("messagebox.onboarding.app.read_box_id") as identity:
+            for value in (None, "BOX-42"):
+                identity.return_value = value
+                response = self.client.request("GET", "/api/state")
+                self.assertTrue(response["status"].startswith("200"))
+                self.assertEqual(json.loads(response["body"])["box_id"], value)
+
     def test_state_is_public_sanitized_and_has_no_session_fields(self):
         response = self.client.request(
             "GET", "/api/state", headers={"Cookie": "messagebox_session=obsolete"}
@@ -569,7 +660,7 @@ class OnboardingAPITests(unittest.TestCase):
         self.assertEqual(response["status"], "200 OK")
         self.assertEqual(
             set(json.loads(response["body"])),
-            {"mode", "phase", "safe_error", "whatsapp", "recipient_setup", "nfc_setup"},
+            {"mode", "phase", "safe_error", "whatsapp", "recipient_setup", "nfc_setup", "box_id"},
         )
         self.assertIsNone(header(response, "Set-Cookie"))
 
@@ -957,7 +1048,43 @@ class OnboardingAPITests(unittest.TestCase):
         )
         self.assertEqual(added_phone["status"], "200 OK")
         self.assertIn(("recipient_add_phone", "+447700900123"), worker.calls)
+        named_phone = client.form(
+            "POST",
+            "/recipients/add-number",
+            {"phone": "+1 202 555 0199", "name": "סבתא"},
+        )
+        self.assertEqual(named_phone["status"], "200 OK")
+        self.assertIn(("recipient_add_phone", "+12025550199", "סבתא"), worker.calls)
+        renamed = client.form(
+            "POST", "/recipients/rename", {"token": token, "name": "Grandma"}
+        )
+        self.assertEqual(renamed["status"], "200 OK")
+        self.assertIn(("recipient_rename", token, "Grandma"), worker.calls)
         self.assertEqual(store.load()["phase"], "WHATSAPP_READY")
+
+    def test_recipient_api_explains_that_the_box_cannot_select_itself(self):
+        worker = FakeWhatsApp(
+            {
+                "status": "ready",
+                "pairing_code": None,
+                "phone_hint": "WhatsApp number ending in 0123",
+                "eligible_count": 1,
+                "safe_error": None,
+                "attempt": 1,
+            }
+        )
+        worker.recipient_select_phone = mock.Mock(
+            side_effect=PairingError("recipient_matches_linked_account")
+        )
+        client, _, _ = self.home_pairing_client(worker)
+        client.request("GET", "/api/state")
+
+        response = client.form(
+            "POST", "/recipients/select-number", {"phone": "+1 415-555-0123"}
+        )
+
+        self.assertEqual(response["status"], "409 Conflict")
+        self.assertIn(b"cannot be its own recipient", response["body"])
 
     def test_nfc_api_is_opaque_same_origin_and_completes_asynchronously(self):
         token = "recipient-token-0001"
