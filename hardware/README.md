@@ -16,6 +16,68 @@
 
 The parts above are the reference build. Other USB speakers and microphones, and other GPIO-connected buttons, may work electrically and with the software, but each substitution is unvalidated. The printable enclosure was designed for the parts in this list. If you change the speaker, microphone, or another part, the 3D-print designs may need a revision; do not assume the substitute will fit the same case.
 
+## Community wiring diagram
+
+This community-contributed diagram shows a Raspberry Pi 40-pin header, an
+arcade-button switch, a button LED, and a PN532 module in I²C mode. It is a
+visual reference, not a physically validated reference build.
+
+> [!CAUTION]
+> The image omits LED current limiting. Do not connect a bare LED directly to
+> a GPIO: use a suitable series resistor, and an appropriate driver if the
+> illuminated button requires more current or a higher voltage than GPIO can
+> provide. The PN532 reset/request connections also differ from the software
+> defaults; use the configuration below only for this wiring. Disconnect Pi
+> power before connecting or changing any wires.
+
+![Community wiring diagram for the Raspberry Pi button, LED, and PN532 I²C module](images/community-wiring.jpeg)
+
+### Connections shown
+
+BCM GPIO numbers are not physical header pin numbers.
+
+| Connection | Raspberry Pi signal | Physical header pin | Wire in diagram |
+| --- | --- | ---: | --- |
+| Button switch | BCM GPIO 17 | 11 | Blue |
+| Button switch ground | GND | 9 | Green |
+| LED positive, through suitable current limiting/driver | BCM GPIO 26 | 37 | Beige |
+| LED negative | GND | 39 | Black |
+| PN532 VCC | 3.3 V | 1 | Brown |
+| PN532 GND | GND | 25 | Grey |
+| PN532 SDA | BCM GPIO 2 / SDA | 3 | Red |
+| PN532 SCL | BCM GPIO 3 / SCL | 5 | Orange |
+| PN532 RST | BCM GPIO 4 / D4 | 7 | Yellow |
+| PN532 IRQ | BCM GPIO 27 / D27 | 13 | Purple |
+
+Use the switch's COM and normally-open (NO) terminals; identify them from the
+actual switch markings rather than their position in the picture. On the
+pictured PN532 module, I²C mode is switch **1 ON, 2 OFF**. Check the markings
+and documentation for your exact board, including its reset pin and supply
+requirements; other PN532 modules and HATs may differ.
+
+### Configuration for this diagram
+
+For this wiring, set the following values in `/etc/messagebox/env`:
+
+```sh
+MSGBOX_BUTTON_PIN=17
+MSGBOX_LED_PIN=26
+MSGBOX_NFC_RESET_PIN=D4
+MSGBOX_NFC_REQUEST_PIN=D27
+```
+
+The repository defaults in [`config/env.example`](../config/env.example) are
+instead **D20** for reset (physical pin 38) and **D16** for request (physical
+pin 36). If using those defaults, connect the yellow and purple wires to
+those pins instead. Do not combine one wiring layout with the other settings.
+
+Before applying power, independently check header orientation, every
+connection, LED current limiting, and the module's I²C mode. Then follow the
+[hardware test](../README.md#step-8--test-the-hardware). The image and the
+configuration comparison have been reviewed against the repository; physical
+GPIO, LED, and NFC operation with this exact layout has not been verified as
+part of this contribution.
+
 ## Enclosure
 
 The prototype Button Box enclosure has two printable parts:

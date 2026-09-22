@@ -1,16 +1,24 @@
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import messagebox.dashboard.app as dashboard
-from messagebox.settings import SettingsStore
+from messagebox.settings import SettingsError, SettingsStore
 
 
 class DashboardSettingsTests(unittest.TestCase):
     def setUp(self):
+        volume = patch("messagebox.dashboard.app.playback_device", return_value="messagebox_volume")
+        volume.start()
+        self.addCleanup(volume.stop)
+        lock = patch("messagebox.dashboard.app.audio_lock")
+        lock.start()
+        self.addCleanup(lock.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.store = SettingsStore(
             Path(self.directory.name) / "settings.json", environ={"TZ": "UTC"}
@@ -77,6 +85,68 @@ class DashboardSettingsTests(unittest.TestCase):
             {"Origin": "http://button-box.local"},
         )
         self.assertEqual(code, 409)
+
+    def test_runtime_state_exposes_only_assigned_inventory_identity(self):
+        with patch.object(dashboard, "contacts_store") as contacts, patch.object(
+            dashboard, "RecipientSetup"
+        ), patch.object(dashboard.subprocess, "run", side_effect=OSError), patch.object(
+            dashboard, "read_box_id"
+        ) as identity:
+            contacts.return_value.public_view.return_value = {"contacts": {}}
+            for value in (None, "BOX-42"):
+                identity.return_value = value
+                code, payload = self.request("GET", "/api/state")
+                self.assertEqual(code, 200)
+                self.assertEqual(payload["box_id"], value)
+                self.assertEqual(payload["mode"], "RUNTIME")
+                self.assertEqual(payload["health"]["runtime"], "attention")
+
+    def test_ringtone_preview_reports_playback_failure(self):
+        with patch.object(dashboard, "preview_ringtone", side_effect=SettingsError("Button Box audio could not play")):
+            code, payload = self.request(
+                "POST",
+                "/api/ringtone-preview",
+                {"ringtone_id": "ding_dong"},
+                {"Origin": "http://button-box.local"},
+            )
+
+        self.assertEqual(code, 409)
+        self.assertEqual(payload["error"], "Button Box audio could not play")
+
+    def test_ringtone_preview_waits_for_successful_speaker_command(self):
+        ringtone = Path(self.directory.name) / "ringtone.wav"
+        ringtone.touch()
+        with patch.object(dashboard, "ringtone_path", return_value=ringtone), patch.object(
+            dashboard.subprocess, "run"
+        ) as run:
+            dashboard.preview_ringtone("ding_dong")
+
+        run.assert_called_once()
+        self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_ringtone_preview_translates_speaker_command_failure(self):
+        ringtone = Path(self.directory.name) / "ringtone.wav"
+        ringtone.touch()
+        with patch.object(dashboard, "ringtone_path", return_value=ringtone), patch.object(
+            dashboard.subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(1, ["aplay"]),
+        ):
+            with self.assertRaisesRegex(SettingsError, "audio could not play"):
+                dashboard.preview_ringtone("ding_dong")
+
+    def test_ringtone_preview_timeout_releases_lock_for_retry(self):
+        ringtone = Path(self.directory.name) / "ringtone.wav"
+        ringtone.touch()
+        timeout = subprocess.TimeoutExpired(["aplay"], 30)
+        with patch.object(dashboard, "ringtone_path", return_value=ringtone), patch.object(
+            dashboard.subprocess, "run", side_effect=[timeout, None]
+        ) as run:
+            with self.assertRaisesRegex(SettingsError, "audio could not play"):
+                dashboard.preview_ringtone("ding_dong")
+            dashboard.preview_ringtone("ding_dong")
+
+        self.assertEqual(run.call_count, 2)
 
     def test_cross_site_update_is_rejected_before_reading_body(self):
         code, payload = self.request(
@@ -192,6 +262,23 @@ class DashboardSettingsTests(unittest.TestCase):
                 {"success": True, "data": {"connected": True}}
             )
         )
+
+    def test_runtime_health_requires_active_button_service(self):
+        with patch.object(
+            dashboard.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+        ) as run:
+            self.assertTrue(dashboard.runtime_running())
+        run.assert_called_once_with(
+            ["systemctl", "is-active", "--quiet", "messagebox-button.service"],
+            capture_output=True,
+            check=False,
+            timeout=2,
+        )
+
+        with patch.object(
+            dashboard.subprocess, "run", return_value=SimpleNamespace(returncode=3)
+        ):
+            self.assertFalse(dashboard.runtime_running())
 
 
 if __name__ == "__main__":

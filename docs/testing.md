@@ -2,7 +2,7 @@
 
 ## Repository tests
 
-- `make test` runs the synthetic Python unit suite.
+- `make test` runs the synthetic Python unit and JavaScript UI-contract suites.
 - `make lint` requires `uvx` (from `uv`) and `bunx` (from Bun). It runs Ruff for
   Python, ShellCheck for shell scripts, and Biome for frontend assets. `uvx` and
   `bunx` download these tools on first use.
@@ -13,6 +13,22 @@ required.
 
 Synthetic tests cover routing, onboarding, redaction, pairing, NFC, and recovery
 contracts. They do not replace physical Pi, phone, network, or hardware tests.
+
+## Regression test matrix
+
+Matrix case IDs are permanent. Add new cases with a new descriptive ID; do not
+renumber or reuse an existing ID.
+
+Every confirmed product bug must add a matrix case or explicitly update an
+existing case and its regression test before the fix is complete. If automation
+is impossible, record the reason in the pull request and keep a precise manual
+assertion in this matrix.
+
+| Case ID | Regression | Synthetic setup and expected result | Software evidence | Separate physical assertion |
+| --- | --- | --- | --- | --- |
+| `BB-RX-001` | Consecutive inbound voice notes | Provide two allowed audio messages from different synthetic senders in one poll while sync remains active. Both queue exactly once in oldest-first order with unique queue filenames; media retrieval is read-only and does not make continuous sync release the store lock. | `tests/test_voicepoll.py::PollingStoreTests::test_consecutive_senders_queue_oldest_first_without_store_write_lock` and `tests/test_whatsapp_pairing.py::WhatsAppFrontendAndServiceContractTests::test_service_separates_web_user_from_live_store_and_keeps_runtime_stopped` | On a test box, send two voice notes from separate test accounts in quick succession while the first is downloading. Verify both appear and play once in send order. Record device, revision, observed times, and result without storing message content or account identifiers. |
+| `BB-RQ-001` | Caregiver requeues recently played media | Archive synthetic voice audio and an ordinary video soundtrack after playback. The dashboard returns safe newest-first metadata and an opaque handle. Each replay appends after existing waiting messages using a fresh queue identity while preserving its original history identity, exact sender/chat display identity, and routing sidecar. An active replay is absent from Recently played until it is played again, including while held or in trash. Repeated and concurrent requests create one playable WAV; claim, release, recovery, hold, trash, and replay scans observe complete transitions. Restart preserves real queued state, while interrupted publication or archive commits recover without a phantom duplicate. Expired, missing or policy-pruned media cannot stream or requeue. | `tests/test_played_history.py::PlayedHistoryTests`, `tests/test_dashboard_queue_hold.py::DashboardQueueHoldTests::test_recently_played_is_newest_first_safe_and_requeues_once`, `tests/test_dashboard_queue_hold.py::DashboardQueueHoldTests::test_dashboard_move_waits_for_replay_history_transition`, and the recently-played cases in `tests/onboarding-ui.test.js` | On a test box at the exact candidate revision, leave two synthetic messages waiting, then requeue a retained voice note and ordinary video soundtrack. Confirm both append in request order with the original sender/chat labels and disappear from Recently played while queued, held or in trash. Refresh and restart before playback, then verify exactly one playback each, that each returns to Recently played only after playback, and that reply routing remains bound to the original chats. Confirm a deliberately expired or pruned fixture cannot stream or requeue. Do not treat circular video notes as supported. |
+| `BB-RT-001` | Recent-sender routing cannot drift during replay or bypass NFC | Archive an older message from sender A and a newer message from sender B. Requeue B and move it through queue, in-flight, hold, and trash; B remains the recent route even while hidden from Recently played. A removed or invalid fresh B route blocks instead of choosing A or the default. With no card or claimed inbound, standalone hold-release and tap-review sessions use fresh B; a fresh card still wins, and unknown-card or unhealthy-reader state blocks. No/expired history alone permits the configured default. | `tests/test_played_history.py::PlayedHistoryTests::test_active_newest_replay_remains_the_recent_route_in_every_queue_state`, `tests/test_played_history.py::PlayedHistoryTests::test_invalid_or_removed_newest_route_never_selects_an_older_sender`, and the recent-routing cases in `tests/test_button_routing.py` | On the exact candidate revision, play messages from two test chats, requeue the newer one, and exercise both recording modes. Verify replies stay bound to the newer chat through refresh/restart/hold/trash, a fresh NFC choice overrides it, and removed-contact, unknown-card, and unavailable-reader states block without sending to an older/default chat. |
 
 ## Physical test scenarios
 
@@ -33,12 +49,20 @@ For installation and consumer onboarding, test:
 - Initial default selection, switching the default among allowed recipients,
   protection from removing the current default, no-card routing after a switch,
   defer/resume, and recipient-manager recovery
-- New voice note, physical playback, guided reply review, and accepted send
+- New voice note and ordinary video with speech, physical playback, guided reply
+  review, and accepted send. Confirm a no-audio video is skipped and the next
+  valid message still plays. Circular instant video notes remain an explicit
+  unsupported case with the pinned wacli 0.17.1 client.
 - Zero-tag Skip, person and group pairing, multiple tags per recipient,
   explicit reassignment, remove-after-beep behavior, Retry/Skip when the reader
   is unavailable, and the distinct read/success tones
 - Reload within and after the two-minute pending-tag window, completion with and
   without mappings, and the onboarding-to-runtime service handoff
+- After both Skip and Done, verify from another device on the same Wi-Fi that
+  the printed `.local` hostname resolves to the box's current Wi-Fi IPv4 address
+  and that the dashboard opens. Repeat after the advertised mDNS records expire
+  from client caches and after a cold reboot. A listening port or a successful
+  request made on the box itself is insufficient for this check.
 - Reboot and power loss during onboarding transitions
 
 For the standalone developer flow and runtime, test:
@@ -49,3 +73,36 @@ For the standalone developer flow and runtime, test:
 - First send and reply
 - Reboot and power-loss recovery
 - Rollback to the previous working release
+
+# Recipient and activity checks during setup
+
+Navigation refetches server state, including after the setup-to-runtime handoff.
+Runtime needing attention must not be labeled "Setup in progress". Verify Home
+and Activity after completion without reloading the tab.
+
+After scanning an unpaired tag, allow a new international number directly on
+"Who is this tag for?". The scan and existing mappings remain intact; adding
+does not change the default or assign the tag. Choose the new recipient to
+assign explicitly. Check invalid/self numbers, retry after an uncertain response,
+and background polling while typing. Existing allowed-recipient validation applies.
+
+Activity is read-only during setup and shows content-free recorded events or
+an empty state. It uses the existing group-restricted pairing-worker socket:
+the portal does not gain runtime-store access. Test before WhatsApp linking,
+after receive/play/send events, with no history, and with the worker unavailable.
+Never complete setup or expose audio/recipient identifiers just to view events.
+
+# Early send during own-recording review
+
+In tap/review mode, a fresh deliberate press during review of the user's own
+recording stops preview and approves that recording once. It skips the later
+send prompt, approval timeout and delete warning. Incoming-message listening
+is unchanged. A held recording-stop press must be released before review can
+accept a new press. With no review press, the existing prompt, timeout, warning
+and cancellation flow remains unchanged. Approval queues a send; only actual
+send success may trigger the successful-send sound.
+
+On a named box, verify early review approval for both standalone and reply
+flows, a held recording-stop press, a short bounce, no approval/cancellation,
+and exactly one outgoing voice note in the intended chat. Keep software tests
+and physical switch/audio/delivery evidence separate.

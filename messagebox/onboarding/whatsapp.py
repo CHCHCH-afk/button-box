@@ -23,9 +23,12 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 from messagebox.onboarding.recipients import RecipientError, RecipientSetup
+from messagebox.onboarding.activity import setup_activity
+from messagebox.runtime_paths import STATE_DIR
 from messagebox.onboarding.paths import (
     MESSAGEBOX_HOME,
     WACLI_PATH,
@@ -178,8 +181,36 @@ def _rows(value):
     return []
 
 
-def eligible_conversations(value, limit=MAX_ELIGIBLE_CONVERSATIONS):
+def _has_row_list(value):
+    if isinstance(value, list):
+        return True
+    return isinstance(value, dict) and any(
+        isinstance(value.get(key), list) for key in ("data", "chats", "results")
+    )
+
+
+def _group_label(value):
+    if not isinstance(value, str):
+        return None
+    label = unicodedata.normalize("NFC", value).strip()[:80]
+    if not label or any(unicodedata.category(char).startswith("C") for char in label):
+        return None
+    if _JID.fullmatch(label.casefold()) or re.fullmatch(r"\+?[0-9 ().-]{7,}", label):
+        return None
+    return label
+
+
+def eligible_conversations(value, limit=MAX_ELIGIBLE_CONVERSATIONS, *, groups=None):
     """Return at most ``limit`` recent group/DM references from wacli JSON."""
+    group_names = {}
+    for group in _rows(groups):
+        if not isinstance(group, dict):
+            continue
+        group_jid = group.get("jid") or group.get("JID")
+        group_name = group.get("name") or group.get("Name")
+        group_name = _group_label(group_name)
+        if isinstance(group_jid, str) and group_name is not None:
+            group_names[group_jid.strip().lower()] = group_name
     result = []
     seen = set()
     for row in _rows(value):
@@ -201,12 +232,10 @@ def eligible_conversations(value, limit=MAX_ELIGIBLE_CONVERSATIONS):
         label = str(label).strip()[:80] or "WhatsApp conversation"
         if jid.endswith("@s.whatsapp.net"):
             label = f"+{jid.split('@', 1)[0]}"
-        elif (
-            label == "WhatsApp conversation"
-            or _JID.fullmatch(label.casefold())
-            or re.fullmatch(r"\+?[0-9 ().-]{7,}", label)
-        ):
-            label = "WhatsApp group"
+        else:
+            label = _group_label(label)
+            if label is None or label == "WhatsApp conversation":
+                label = group_names.get(jid) or "Group name unavailable"
         result.append({"jid": jid, "label": label})
         seen.add(jid)
         if len(result) >= limit:
@@ -226,6 +255,22 @@ def _masked_phone(document):
     if not phone.isdigit():
         return "Linked account"
     return f"WhatsApp number ending in {phone[-4:]}"
+
+
+def _linked_account_jid(document):
+    if isinstance(document, dict) and isinstance(document.get("data"), dict):
+        document = document["data"]
+    if not isinstance(document, dict) or document.get("authenticated") is not True:
+        return None
+    jid = document.get("linked_jid")
+    if isinstance(jid, str):
+        jid = jid.strip().lower()
+        if _JID.fullmatch(jid) and jid.endswith("@s.whatsapp.net"):
+            return jid
+    phone = document.get("phone")
+    if isinstance(phone, str) and phone.isdigit() and phone != "0":
+        return f"{phone}@s.whatsapp.net"
+    return None
 
 
 class PairingEngine:
@@ -418,6 +463,11 @@ class PairingEngine:
                 raise PairingError("unlink_current_account_first")
             if state["safe_error"] == "CLEANUP_FAILED":
                 raise PairingError("cleanup_required")
+            # Reject conflicts before creating a WhatsApp link that cannot be saved.
+            try:
+                self._check_promotion_destination()
+            except (OSError, PairingError):
+                return self._set_state("failed", error="STORE_CONFLICT")
             self._pause_sync()
             self._remove_stage()
             self.stage.mkdir(mode=0o700)
@@ -510,6 +560,20 @@ class PairingEngine:
         if self._load_state()["status"] != "ready":
             raise PairingError("whatsapp_not_ready")
 
+    def _live_account_jid(self):
+        self._require_ready()
+        auth = self._run_wacli(
+            self.live_store,
+            ["--read-only", "--json", "auth", "status"],
+            timeout=15,
+        )
+        if auth.returncode != 0:
+            raise PairingError("auth_status_failed")
+        jid = _linked_account_jid(_json_document(auth.stdout))
+        if jid is None:
+            raise PairingError("not_authenticated")
+        return jid
+
     def _live_candidates(self, *, refresh=False):
         self._require_ready()
         if refresh:
@@ -540,7 +604,21 @@ class PairingEngine:
             )
             if chats.returncode != 0:
                 raise PairingError("recipient_refresh_failed")
-            candidates = eligible_conversations(_json_document(chats.stdout))
+            groups = self._run_wacli(
+                self.live_store,
+                ["--read-only", "--json", "--full", "groups", "list", "--limit", "50"],
+                timeout=15,
+            )
+            if groups.returncode != 0:
+                raise PairingError("recipient_refresh_failed")
+            try:
+                chats_document = _json_document(chats.stdout)
+                groups_document = _json_document(groups.stdout)
+            except PairingError as exc:
+                raise PairingError("recipient_refresh_failed") from exc
+            if not _has_row_list(chats_document) or not _has_row_list(groups_document):
+                raise PairingError("recipient_refresh_failed")
+            candidates = eligible_conversations(chats_document, groups=groups_document)
             self._write_candidates(candidates, self.candidates_path)
         else:
             try:
@@ -551,7 +629,9 @@ class PairingEngine:
             if not isinstance(candidates, list) or eligible_conversations(candidates) != candidates:
                 raise PairingError("recipient_list_failed")
         try:
-            return self.recipients.reconcile(candidates)
+            return self.recipients.reconcile(
+                candidates, excluded_jid=self._live_account_jid()
+            )
         except RecipientError as exc:
             raise PairingError("recipient_state_failed") from exc
 
@@ -562,8 +642,20 @@ class PairingEngine:
         except RecipientError as exc:
             raise PairingError("recipient_state_failed") from exc
 
+    def activity_state(self):
+        return setup_activity(STATE_DIR / "events.jsonl")
+
     def recipient_list(self, *, refresh=False):
-        return self._live_candidates(refresh=refresh)
+        if not refresh:
+            return self._live_candidates()
+        with self._lock:
+            # Continuous sync owns the writable store; release it for the
+            # bounded one-shot refresh and restart it on every outcome.
+            self._pause_sync()
+            try:
+                return self._live_candidates(refresh=True)
+            finally:
+                self._resume_sync()
 
     def recipient_defer(self):
         self._require_ready()
@@ -575,28 +667,34 @@ class PairingEngine:
     def recipient_select(self, token):
         self._require_ready()
         try:
-            return self.recipients.select_default(token)
+            return self.recipients.select_default(
+                token, excluded_jid=self._live_account_jid()
+            )
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
-    def recipient_select_phone(self, phone):
+    def recipient_select_phone(self, phone, name=None):
         self._require_ready()
         try:
-            return self.recipients.select_phone(normalize_phone(phone))
+            return self.recipients.select_phone(
+                normalize_phone(phone), name=name, excluded_jid=self._live_account_jid()
+            )
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
     def recipient_add(self, token):
         self._require_ready()
         try:
-            return self.recipients.add(token)
+            return self.recipients.add(token, excluded_jid=self._live_account_jid())
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
-    def recipient_add_phone(self, phone):
+    def recipient_add_phone(self, phone, name=None):
         self._require_ready()
         try:
-            return self.recipients.add_phone(normalize_phone(phone))
+            return self.recipients.add_phone(
+                normalize_phone(phone), name=name, excluded_jid=self._live_account_jid()
+            )
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
@@ -610,7 +708,16 @@ class PairingEngine:
     def recipient_default(self, token):
         self._require_ready()
         try:
-            return self.recipients.choose_default(token)
+            return self.recipients.choose_default(
+                token, excluded_jid=self._live_account_jid()
+            )
+        except RecipientError as exc:
+            raise PairingError(str(exc)) from exc
+
+    def recipient_rename(self, token, name):
+        self._require_ready()
+        try:
+            return self.recipients.rename(token, name)
         except RecipientError as exc:
             raise PairingError(str(exc)) from exc
 
@@ -719,7 +826,21 @@ class PairingEngine:
         )
         if chats.returncode != 0:
             raise PairingError("conversation_list_failed")
-        candidates = eligible_conversations(_json_document(chats.stdout))
+        groups = self._run_wacli(
+            self.stage,
+            ["--read-only", "--json", "--full", "groups", "list", "--limit", "50"],
+            timeout=15,
+        )
+        if groups.returncode != 0:
+            raise PairingError("conversation_list_failed")
+        try:
+            chats_document = _json_document(chats.stdout)
+            groups_document = _json_document(groups.stdout)
+        except PairingError as exc:
+            raise PairingError("conversation_list_failed") from exc
+        if not _has_row_list(chats_document) or not _has_row_list(groups_document):
+            raise PairingError("conversation_list_failed")
+        candidates = eligible_conversations(chats_document, groups=groups_document)
         self._write_candidates(candidates, self.stage / self.candidates_path.name)
         with self._lock:
             self._raise_if_cancelled()
@@ -859,15 +980,18 @@ class PairingEngine:
         self._remove_stage()
         return True
 
-    def _promote_store(self):
+    def _check_promotion_destination(self):
         if self.backup.exists() or self.backup.is_symlink():
             raise PairingError("promotion_backup_exists")
-        if self.stage.is_symlink() or not self.stage.is_dir():
-            raise PairingError("staging_store_invalid")
         if self.live_store.is_symlink():
             raise PairingError("symlinked_store_rejected")
         if self.live_store.exists() and any(self.live_store.iterdir()):
             raise PairingError("live_store_not_empty")
+
+    def _promote_store(self):
+        self._check_promotion_destination()
+        if self.stage.is_symlink() or not self.stage.is_dir():
+            raise PairingError("staging_store_invalid")
         moved_live = False
         try:
             if self.live_store.exists():
@@ -1006,6 +1130,9 @@ class WhatsAppPairingClient:
     def recipient_state(self):
         return self._request({"action": "recipient_state"})
 
+    def activity_state(self):
+        return self._request({"action": "activity_state"})
+
     def recipient_list(self, *, refresh=False):
         return self._request(
             {"action": "recipient_list", "refresh": bool(refresh)},
@@ -1018,17 +1145,25 @@ class WhatsAppPairingClient:
     def recipient_select(self, token):
         return self._request({"action": "recipient_select", "token": token})
 
-    def recipient_select_phone(self, phone):
+    def recipient_select_phone(self, phone, name=None):
         return self._request(
-            {"action": "recipient_select_phone", "phone": normalize_phone(phone)}
+            {
+                "action": "recipient_select_phone",
+                "phone": normalize_phone(phone),
+                "name": name or "",
+            }
         )
 
     def recipient_add(self, token):
         return self._request({"action": "recipient_add", "token": token})
 
-    def recipient_add_phone(self, phone):
+    def recipient_add_phone(self, phone, name=None):
         return self._request(
-            {"action": "recipient_add_phone", "phone": normalize_phone(phone)}
+            {
+                "action": "recipient_add_phone",
+                "phone": normalize_phone(phone),
+                "name": name or "",
+            }
         )
 
     def recipient_remove(self, token):
@@ -1036,6 +1171,11 @@ class WhatsAppPairingClient:
 
     def recipient_default(self, token):
         return self._request({"action": "recipient_default", "token": token})
+
+    def recipient_rename(self, token, name):
+        return self._request(
+            {"action": "recipient_rename", "token": token, "name": name}
+        )
 
 
 class _PairingHandler(socketserver.StreamRequestHandler):
@@ -1060,6 +1200,8 @@ class _PairingHandler(socketserver.StreamRequestHandler):
                 state = self.server.engine.relink()
             elif action == "recipient_state" and set(request) == {"action"}:
                 state = self.server.engine.recipient_state()
+            elif action == "activity_state" and set(request) == {"action"}:
+                state = self.server.engine.activity_state()
             elif action == "recipient_list" and set(request) == {"action", "refresh"}:
                 if not isinstance(request["refresh"], bool):
                     raise PairingError("invalid_action")
@@ -1068,16 +1210,30 @@ class _PairingHandler(socketserver.StreamRequestHandler):
                 state = self.server.engine.recipient_defer()
             elif action == "recipient_select" and set(request) == {"action", "token"}:
                 state = self.server.engine.recipient_select(request["token"])
-            elif action == "recipient_select_phone" and set(request) == {"action", "phone"}:
-                state = self.server.engine.recipient_select_phone(request["phone"])
+            elif action == "recipient_select_phone" and set(request) == {
+                "action", "phone", "name"
+            }:
+                state = self.server.engine.recipient_select_phone(
+                    request["phone"], request["name"]
+                )
             elif action == "recipient_add" and set(request) == {"action", "token"}:
                 state = self.server.engine.recipient_add(request["token"])
-            elif action == "recipient_add_phone" and set(request) == {"action", "phone"}:
-                state = self.server.engine.recipient_add_phone(request["phone"])
+            elif action == "recipient_add_phone" and set(request) == {
+                "action", "phone", "name"
+            }:
+                state = self.server.engine.recipient_add_phone(
+                    request["phone"], request["name"]
+                )
             elif action == "recipient_remove" and set(request) == {"action", "token"}:
                 state = self.server.engine.recipient_remove(request["token"])
             elif action == "recipient_default" and set(request) == {"action", "token"}:
                 state = self.server.engine.recipient_default(request["token"])
+            elif action == "recipient_rename" and set(request) == {
+                "action", "token", "name"
+            }:
+                state = self.server.engine.recipient_rename(
+                    request["token"], request["name"]
+                )
             else:
                 raise PairingError("invalid_action")
             return self._respond({"ok": True, "state": state})
@@ -1089,6 +1245,8 @@ class _PairingHandler(socketserver.StreamRequestHandler):
                 "unlink_current_account_first",
                 "whatsapp_not_ready",
                 "recipient_setup_started",
+                "recipient_matches_linked_account",
+                "recipient name is invalid",
             }:
                 error = "pairing_request_failed"
             return self._respond({"ok": False, "error": error})

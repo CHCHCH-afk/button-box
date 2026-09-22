@@ -9,6 +9,12 @@ See [Audio Book usage, installation and updates](docs/audio-books.md).
 [AI-assisted upgrade guide](upgrade/AGENTS.md), not the fresh-card build below.
 It preserves the existing hostname, Wi-Fi, WhatsApp pairing and local library.
 
+![Illustrated Button Box with a glowing blue button and family portraits](assets/readme-hero.webp)
+
+> **[Join the Button Box WhatsApp community →](https://chat.whatsapp.com/FJ8LYL79k8zEMfoiyPjLPb?mode=gi_t)**
+>
+> Meet other builders, share progress, and help shape the project.
+
 **Button Box is a screen-free way for kids to send and receive WhatsApp voice
 messages with family on their own.**
 
@@ -18,8 +24,18 @@ approved person or group. Incoming replies wait on the box until the child
 presses the button to listen.
 
 [Visit button.box](https://button.box/) ·
-[Join the WhatsApp community](https://chat.whatsapp.com/FJ8LYL79k8zEMfoiyPjLPb?mode=gi_t) ·
-[Report an issue](https://github.com/button-box/button-box/issues)
+[Report an issue](https://github.com/button-box/button-box/issues) ·
+[Testing and regression matrix](docs/testing.md)
+
+## Latest release
+
+[v0.1.0](https://github.com/button-box/button-box/releases/tag/v0.1.0)
+includes voice messaging, video audio, recipient routing, the caregiver dashboard
+and startup recovery. Tested on Raspberry Pi 4. The source release includes
+a bounded updater, an installed-code manifest and checksums. Read the
+[release notes](docs/releases/v0.1.0.md) before
+installation. Each assembled unit requires its own physical acceptance run
+before delivery.
 
 
 ## Build a Button Box
@@ -38,6 +54,10 @@ The complete journey is:
 
 Each detailed step below ends with a **Done when** checkpoint. If the observed
 result differs, stop there and troubleshoot instead of pushing ahead.
+
+For repeatable release and per-unit verification, use the
+[canonical acceptance matrix](docs/box-acceptance.md) and its
+[per-unit run template](docs/box-acceptance-run-template.md).
 
 ## Step 1 — Buy your parts
 
@@ -162,9 +182,9 @@ The default public GPIO configuration is:
 | PN532 data | I²C |
 
 > [!CAUTION]
-> A verified community wiring diagram is not in the repository yet. The pin
-> list above is a software configuration reference, not a complete wiring
-> diagram. Confirm button voltage, LED current limiting, connector sizes, Pi
+> A [community wiring diagram](hardware/README.md#community-wiring-diagram) is available,
+> with different PN532 reset/request pins and configuration notes. It has not
+> been physically validated. The pin list above remains the software default. Confirm button voltage, LED current limiting, connector sizes, Pi
 > pin numbering, and PN532 I²C mode before applying power. Never connect or
 > disconnect GPIO wiring while the Pi is powered.
 

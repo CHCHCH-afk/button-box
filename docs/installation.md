@@ -11,10 +11,15 @@ account, Wi-Fi and WhatsApp pairing. Repository/product names do not determine
 the SSH address. Replace all fresh-install hostname examples with the actual
 device address; do not rename a working Pi to match them.
 
-Validate installation changes on a spare Raspberry Pi 4 and microSD card. Do
-not overwrite a working device without a tested backup.
+Validate installation changes on a spare Raspberry Pi 4 and microSD card.
+Production/customer updates need a recovery plan. A disposable development box
+may explicitly waive rollback backups; never include its private state in a
+release artifact.
 
 ## Manufacturer preparation
+
+Assign the verified physical inventory ID using [dashboard support identity](dashboard-identity.md).
+It is optional for operation; unassigned boxes show **Not assigned** in the support footer.
 
 1. In Raspberry Pi Imager, install Raspberry Pi OS Lite 64-bit based on Debian
    13. Enable SSH and create a non-root sudo-capable administrator. Set the
@@ -37,11 +42,28 @@ not overwrite a working device without a tested backup.
    Neither method transfers device runtime state, pairs WhatsApp, or starts
    Button Box services.
 
+   Updates migrate boot selection without changing the onboarding marker or
+   runtime component selection. The installer validates the staged generator,
+   removes the non-selected legacy boot link first, atomically installs the
+   generator, then removes the selected legacy link. It enables the
+   marker/reconciliation path only after a daemon reload proves that exactly
+   one generated dependency matches the marker. Repeating the migration is
+   safe. An unsafe marker or unexpected legacy link stops the update before
+   either legacy link is removed.
+
    Connect the microphone and USB speaker before running setup. On a fresh
    installation, setup selects the lowest-numbered ALSA capture device and USB
    playback device, then records their card names in `/etc/messagebox/env`;
    setup fails if either is unavailable. Later updates preserve the existing
    file and operator customization.
+
+   The installed audio-detection service discovers current ALSA card names at
+   boot and supplies four audio-device overrides through
+   `/run/messagebox-audio/audio.env`. Runtime and setup audio consumers wait
+   for detection. With one microphone and one USB speaker, moving their USB
+   ports while powered off should not require editing configuration. Live
+   hot-plug recovery and choosing among multiple microphones/speakers are not
+   guaranteed; power down before moving devices and repeat the physical check.
 
    The Pi needs internet access during setup. See
    [Internet access for a fresh card](developer-onboarding.md#internet-access-for-a-fresh-card).
@@ -62,10 +84,13 @@ not overwrite a working device without a tested backup.
 
 1. Power on Button Box.
 2. Join its setup hotspot with the supplied password and open the printed URL.
-3. Submit the home Wi-Fi credentials. The setup hotspot will disappear.
-4. Reconnect the phone to home Wi-Fi and reopen the same URL, such as
-   `http://button-box-001.local/`. The network switch may take up to two
-   minutes; retry if the page is not ready.
+3. Copy the setup URL before submitting Wi-Fi credentials. The setup hotspot
+   will disappear, and an iPhone may close its captive setup window.
+4. In the phone's Wi-Fi settings, join the exact network selected for the box
+   (including a separate IoT network), then open the copied URL in Safari or
+   Chrome. Closing the setup window does not prove the box connected. If the
+   address does not open, verify the phone's network and retry. If the setup
+   hotspot returns, reconnect to it and check the Wi-Fi name and password.
 5. Pair WhatsApp using a number beginning with `+` and its international country
    code.
 6. Choose a recent WhatsApp person or group as the initial default recipient, or
@@ -110,3 +135,32 @@ guesses the default while mapped-card state is unsafe. Do not continue with
 
 Before deployment, run the [physical test scenarios](testing.md#physical-test-scenarios)
 on a spare device.
+
+For an existing box, use the [manifest-bounded update and rollback
+procedure](bounded-updates.md). The fresh-install setup and provisioning paths
+also manage accounts, packages, configuration, and service enablement, so they
+are not an in-place release update.
+
+## Boot-mode recovery
+
+Use these checks only after stopping Button Box runtime and setup services.
+The marker must be either absent for runtime or a root-owned regular mode-0600
+file containing exactly `enabled` plus a newline for setup. Symlinks, devices,
+directories, unexpected content, and unreadable markers intentionally select
+neither mode.
+
+After correcting an authorized marker or restoring reviewed unit files, run:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl start messagebox-mode-reconcile.path
+sudo systemctl start messagebox-mode-reconcile.service
+systemctl status messagebox-mode-reconcile.path messagebox-mode-reconcile.service
+```
+
+Runtime mode should have `messagebox.target` active, Comitup inactive, and all
+enabled target components active. Setup mode should have the target inactive
+and Comitup active; verify either its connected home portal or its setup
+hotspot portal before calling recovery usable. Do not recreate either legacy
+`multi-user.target.wants` link. The generator-owned link under `/run` is
+ephemeral and must match the marker after every daemon reload.

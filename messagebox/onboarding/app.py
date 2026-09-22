@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 from messagebox.audio_volume import VOLUME_WARNING, apply_volume, playback_device
 
+from messagebox.identity import read_box_id
 from messagebox.onboarding.comitup_adapter import ComitupAdapter, ComitupError
 from messagebox.onboarding.connectivity import ConnectivityChecker
 from messagebox.onboarding.completion import request_completion
@@ -51,6 +52,8 @@ STATIC_DIR = Path(__file__).with_name("static")
 RINGTONE_PREVIEW_LOCK = threading.Lock()
 _UNSET = object()
 
+
+
 _DEVICE_ID = re.compile(r"[A-Za-z0-9-]{1,32}\Z")
 _CANONICAL_HOST = re.compile(
     r"(?:button|message)-box-[A-Za-z0-9-]{1,32}\.local\Z", re.IGNORECASE
@@ -85,20 +88,19 @@ _HANDOFF_HTML = b"""<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Connecting | Button Box</title>
   <style nonce="messagebox-handoff">body{margin:0;background:#05070a;color:#f5f1e8;font:18px/1.5 system-ui,sans-serif}.shell{min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box}.card{max-width:34rem;background:#171a1d;border:1px solid #363b3d;border-radius:20px;padding:28px}.eyebrow{color:#69c5a5;text-transform:uppercase;letter-spacing:.12em;font-size:.75rem;font-weight:700}h1{line-height:1.1}.lede,.status{color:#adb7b0}.pulse{width:34px;height:34px;border:4px solid #363b3d;border-top-color:#69c5a5;border-radius:50%;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.pulse{animation:none;border-color:#69c5a5}}.button{display:inline-block;color:#07120e;background:#69c5a5;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700}</style>
-  <script nonce="messagebox-handoff">"use strict";let remaining=120;const status=()=>{const element=document.getElementById("handoff-status");if(remaining>0){const minutes=Math.floor(remaining/60);const seconds=String(remaining%60).padStart(2,"0");element.textContent=`Connecting to home Wi-Fi... ${minutes}:${seconds} remaining`;}else{element.textContent="Still waiting. Rejoin home Wi-Fi, then try the setup URL.";}remaining=Math.max(0,remaining-1);};window.addEventListener("DOMContentLoaded",status);window.setInterval(status,1000);</script>
 </head>
 <body>
   <main class="shell">
     <section class="card handoff" aria-labelledby="handoff-title">
       <p class="eyebrow">Wi-Fi setup</p>
       <div class="pulse" aria-hidden="true"></div>
-      <h1 id="handoff-title">Switching to home Wi-Fi</h1>
-      <p class="lede">The setup network will disappear. That is expected.</p>
+      <h1 id="handoff-title">Join the same Wi-Fi</h1>
+      <p class="lede">The box is trying to connect. Its setup hotspot will disappear and your phone may close this page.</p>
       <ol class="steps">
-        <li>Reconnect this phone to your home Wi-Fi.</li>
-        <li>Open <strong>__MESSAGEBOX_URL__</strong> to continue with WhatsApp.</li>
+        <li>In your phone's Wi-Fi settings, join the network you selected for the box, even if it is a separate IoT network.</li>
+        <li>Open <strong>__MESSAGEBOX_URL__</strong> in Safari or Chrome to continue setup.</li>
       </ol>
-      <p class="status" id="handoff-status" role="status" aria-live="polite">Connecting to home Wi-Fi... 2:00 remaining</p>
+      <p class="status" id="handoff-status">This page cannot confirm the connection. If the address does not open, check your phone's Wi-Fi and retry.</p>
       <a class="button secondary" href="__MESSAGEBOX_URL__">Try the setup URL now</a>
       <p class="status">If the setup hotspot returns, reopen it and check the Wi-Fi details.</p>
     </section>
@@ -410,6 +412,7 @@ def create_app(
         ("index.html", "text/html; charset=utf-8"),
         ("app.js", "text/javascript; charset=utf-8"),
         ("audio-books.js", "text/javascript; charset=utf-8"),
+        ("clipboard.js", "text/javascript; charset=utf-8"),
         ("styles.css", "text/css; charset=utf-8"),
     ):
         static_files[name] = (STATIC_DIR.joinpath(name).read_bytes(), content_type)
@@ -511,6 +514,7 @@ def create_app(
                 nfc_setup["status"] = "idle"
         return {
             "phase": state["phase"],
+            "box_id": read_box_id(),
             "safe_error": state["safe_error"],
             "mode": selected_mode,
             "whatsapp": whatsapp_state,
@@ -537,10 +541,17 @@ def create_app(
             raise PairingError("recipient_response_invalid")
         cleaned = []
         for recipient in recipients:
-            if not isinstance(recipient, dict) or set(recipient) != {
+            legacy_keys = {
                 "token", "label", "kind", "configured", "is_default", "available", "card_count"
+            }
+            current_keys = legacy_keys | {"secondary_label", "metadata_status"}
+            if not isinstance(recipient, dict) or set(recipient) not in {
+                frozenset(legacy_keys), frozenset(current_keys)
             }:
                 raise PairingError("recipient_response_invalid")
+            recipient = dict(recipient)
+            recipient.setdefault("secondary_label", None)
+            recipient.setdefault("metadata_status", "ready")
             token = recipient["token"]
             label = recipient["label"]
             if (
@@ -549,6 +560,15 @@ def create_app(
                 or not isinstance(label, str)
                 or not label.strip()
                 or len(label) > 80
+                or (
+                    recipient["secondary_label"] is not None
+                    and (
+                        not isinstance(recipient["secondary_label"], str)
+                        or not recipient["secondary_label"].strip()
+                        or len(recipient["secondary_label"]) > 80
+                    )
+                )
+                or recipient["metadata_status"] not in {"ready", "unavailable"}
                 or recipient["kind"] not in {"person", "group"}
                 or any(
                     not isinstance(recipient[key], bool)
@@ -702,17 +722,18 @@ def create_app(
             RINGTONE_PREVIEW_LOCK.release()
             raise RequestError("409 Conflict", "Speaker unavailable. Check its connection and try again.") from exc
 
-        def play():
-            try:
-                subprocess.run(
-                    ["aplay", "-q", "-D", device, os.fspath(path)],
-                    check=False,
-                    timeout=30,
-                )
-            finally:
-                RINGTONE_PREVIEW_LOCK.release()
-
-        threading.Thread(target=play, daemon=True).start()
+        try:
+            subprocess.run(
+                ["aplay", "-q", "-D", device, os.fspath(path)],
+                check=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RequestError(
+                "503 Service Unavailable", "Button Box audio could not play"
+            ) from exc
+        finally:
+            RINGTONE_PREVIEW_LOCK.release()
 
     def application(environ, start_response):
         method = environ.get("REQUEST_METHOD", "GET").upper()
@@ -775,7 +796,7 @@ def create_app(
                     b"__MESSAGEBOX_URL__", displayed_url.encode("ascii")
                 )
                 return Response(body, headers=[("Content-Type", content_type)])(start_response)
-            if method == "GET" and path in {"/static/app.js", "/static/styles.css", "/static/audio-books.js"}:
+            if method == "GET" and path in {"/static/app.js", "/static/audio-books.js", "/static/clipboard.js", "/static/styles.css"}:
                 name = path.rsplit("/", 1)[-1]
                 body, content_type = static_files[name]
                 return Response(body, headers=[("Content-Type", content_type)])(start_response)
@@ -783,6 +804,13 @@ def create_app(
             if method == "GET" and path == "/api/state":
                 state = reconcile_home() if selected_mode == "HOME" else store.load()
                 return _json_response(safe_state(state))(start_response)
+
+            if method == "GET" and path == "/api/data":
+                try:
+                    activity = whatsapp.activity_state()
+                except (OSError, PairingError):
+                    raise RequestError("503 Service Unavailable", "Activity is temporarily unavailable") from None
+                return _json_response(activity)(start_response)
 
             if method == "GET" and path == "/api/settings":
                 document, warning = settings.load()
@@ -809,7 +837,7 @@ def create_app(
                 if set(request) != {"ringtone_id"}:
                     raise RequestError("400 Bad Request", "Invalid ringtone preview request")
                 preview_ringtone(request["ringtone_id"])
-                return _json_response({"ok": True}, "202 Accepted")(start_response)
+                return _json_response({"ok": True})(start_response)
 
             if method == "GET" and path == "/api/networks":
                 if selected_mode != "HOTSPOT":
@@ -955,6 +983,7 @@ def create_app(
                 "/recipients/add-number",
                 "/recipients/remove",
                 "/recipients/default",
+                "/recipients/rename",
                 "/recipients/defer",
             }:
                 _require_same_origin(environ, expected_origin)
@@ -974,7 +1003,7 @@ def create_app(
                         "/recipients/select-number",
                         "/recipients/add-number",
                     }:
-                        if set(document) != {"phone"}:
+                        if set(document) not in ({"phone"}, {"phone", "name"}):
                             raise RequestError(
                                 "400 Bad Request", "Invalid recipient number request"
                             )
@@ -983,7 +1012,20 @@ def create_app(
                             "/recipients/select-number": whatsapp.recipient_select_phone,
                             "/recipients/add-number": whatsapp.recipient_add_phone,
                         }[path]
-                        result = operation(phone)
+                        if "name" in document:
+                            result = operation(phone, document["name"])
+                        else:
+                            result = operation(phone)
+                    elif path == "/recipients/rename":
+                        if set(document) != {"token", "name"} or not _RECIPIENT_TOKEN.fullmatch(
+                            document["token"]
+                        ):
+                            raise RequestError(
+                                "400 Bad Request", "Invalid recipient name request"
+                            )
+                        result = whatsapp.recipient_rename(
+                            document["token"], document["name"]
+                        )
                     else:
                         if set(document) != {"token"} or not _RECIPIENT_TOKEN.fullmatch(
                             document["token"]
@@ -1001,6 +1043,16 @@ def create_app(
                         raise RequestError(
                             "400 Bad Request",
                             "Enter a valid international number beginning with +",
+                        ) from exc
+                    if str(exc) == "recipient_matches_linked_account":
+                        raise RequestError(
+                            "409 Conflict",
+                            "Choose someone else—the linked WhatsApp account cannot be its own recipient",
+                        ) from exc
+                    if str(exc) == "recipient name is invalid":
+                        raise RequestError(
+                            "400 Bad Request",
+                            "Enter a name of 80 characters or fewer without control characters",
                         ) from exc
                     raise RequestError(
                         "409 Conflict", "Recipient setup could not be updated; refresh and try again"

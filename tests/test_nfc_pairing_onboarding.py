@@ -1,5 +1,9 @@
 import json
 import os
+import wave
+import struct
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +36,25 @@ class Reader:
 
 
 class TonePlayerTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required")
+    def test_read_cue_is_long_audible_and_does_not_reuse_old_asset(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch("messagebox.onboarding.nfc.playback_device", return_value="messagebox_volume"):
+            old = Path(directory) / "read-v2.wav"
+            old.write_bytes(b"stale cue")
+            calls = []
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[0] == "ffmpeg":
+                    return subprocess.run(command, **kwargs)
+
+            player = TonePlayer(directory, run=run)
+            player("read")
+            with wave.open(calls[-1][-1], "rb") as source:
+                self.assertAlmostEqual(source.getnframes() / source.getframerate(), 0.40)
+                raw = source.readframes(source.getnframes())
+                self.assertGreaterEqual(max(struct.unpack(f"<{len(raw) // 2}h", raw)), 15000)
+            self.assertEqual(old.read_bytes(), b"stale cue")
+
     def test_uses_shared_software_volume(self):
         calls = []
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
@@ -41,7 +64,7 @@ class TonePlayerTests(unittest.TestCase):
             player = TonePlayer(
                 directory, run=lambda *args, **kwargs: calls.append((args, kwargs))
             )
-            player("read")
+            player("success")
 
         self.assertEqual(
             calls[0][0][0][0:4],
@@ -129,7 +152,7 @@ class NfcPairingOnboardingTests(unittest.TestCase):
 
         paired = self.engine.assign(TOKEN_A)
         self.assertEqual(paired["status"], "success")
-        self.assertEqual(paired["recipient"], {"label": "+15551234567", "kind": "person"})
+        self.assertEqual(paired["recipient"], {"label": "Grandma", "kind": "person"})
         self.assertEqual(paired["mapped_count"], 1)
         self.assertEqual(self.tones, ["read", "success"])
 
@@ -147,13 +170,32 @@ class NfcPairingOnboardingTests(unittest.TestCase):
         self.engine.start()
         mapped = self.engine.observe(CARD_A)
         self.assertEqual(mapped["status"], "already_paired")
-        self.assertEqual(mapped["recipient"]["label"], "+15551234567")
+        self.assertEqual(mapped["recipient"]["label"], "Grandma")
         with self.assertRaises(NfcOnboardingError):
             self.engine.assign(TOKEN_B)
         self.assertEqual(self.engine.allow_reassign()["status"], "choose")
         reassigned = self.engine.assign(TOKEN_B)
         self.assertEqual(reassigned["recipient"]["label"], "Family")
         self.assertEqual(self.contacts.resolve_card("04:01:02:03")["jid"], GROUP)
+
+    def test_allow_recipient_preserves_scanned_tag_default_and_existing_mapping(self):
+        self.contacts.assign_card(PERSON, "04:01:02:03")
+        self.engine.start()
+        self.engine.observe(CARD_B)
+        before = json.loads(self.engine.state_path.read_text())
+        default = self.contacts.load()["default_recipient"]
+        added_recipient = self.recipients.add_phone("+15555550123")
+        repeated = self.recipients.add_phone("+15555550123")
+        self.assertEqual(repeated, added_recipient)
+        self.assertEqual(json.loads(self.engine.state_path.read_text()), before)
+        view = self.engine.public_state()
+        self.assertEqual(view["status"], "choose")
+        self.assertEqual(view["mapped_count"], 1)
+        added = next(r for r in view["recipients"] if r["label"] == "+15555550123")
+        self.engine.assign(added["token"])
+        self.assertEqual(self.contacts.resolve_card(CARD_B)["jid"], "15555550123@s.whatsapp.net")
+        self.assertEqual(self.contacts.resolve_card(CARD_A)["jid"], PERSON)
+        self.assertEqual(self.contacts.load()["default_recipient"], default)
 
     def test_pending_tag_resumes_then_expires_without_exposing_uid(self):
         self.engine.start()

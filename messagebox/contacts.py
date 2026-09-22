@@ -382,6 +382,22 @@ class ContactStore:
 
         return self._mutate(remove)
 
+    def rename_contact(self, jid, label) -> JsonObject:
+        """Change only a contact's display label, preserving routing and cards."""
+        jid = _clean_chat_jid(jid)
+        label = _clean_text(label, "label", MAX_LABEL_LENGTH)
+
+        def rename(document):
+            contact = document["contacts"].get(jid)
+            if contact is None:
+                raise ContactError("contact does not exist")
+            if contact["label"] == label:
+                return False, _contact_result(jid, contact)
+            contact["label"] = label
+            return True, _contact_result(jid, contact)
+
+        return self._mutate(rename)
+
     def set_default_recipient(self, jid) -> JsonObject:
         """Set the first explicit default without replacing an existing one."""
         jid = _clean_chat_jid(jid)
@@ -414,6 +430,38 @@ class ContactStore:
             return True, _contact_result(jid, contact)
 
         return self._mutate(choose_default)
+
+    def replace_default_contact(self, current_jid, new_jid, label) -> JsonObject:
+        """Atomically replace an unpaired onboarding default contact."""
+        current_jid = _clean_chat_jid(current_jid)
+        candidate = validate_contact(new_jid, label)
+        new_jid = candidate["jid"]
+
+        def replace(document):
+            if document["default_recipient"] != current_jid:
+                raise ContactError("default recipient changed")
+            current = document["contacts"].get(current_jid)
+            if current is None:
+                raise ContactError("default contact does not exist")
+            if current["card_uids"]:
+                raise ContactError("paired default recipient cannot be replaced during onboarding")
+            if new_jid == current_jid:
+                return False, _contact_result(new_jid, current)
+            replacement = document["contacts"].get(new_jid)
+            if replacement is None:
+                replacement = {
+                    "label": candidate["label"],
+                    "kind": candidate["kind"],
+                    "receive_after": _clean_receive_after(self.clock()),
+                    "card_uids": [],
+                    "card_clip": candidate["card_clip"],
+                }
+                document["contacts"][new_jid] = replacement
+            del document["contacts"][current_jid]
+            document["default_recipient"] = new_jid
+            return True, _contact_result(new_jid, replacement)
+
+        return self._mutate(replace)
 
     def assign_card(self, jid, uid) -> JsonObject:
         jid = _clean_chat_jid(jid)

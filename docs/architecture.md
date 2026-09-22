@@ -23,14 +23,69 @@ root access they require.
 | Unit | Role |
 | --- | --- |
 | `messagebox-button.service` | Record, play, and send voice messages |
-| `messagebox-poller.service` | Queue voice messages from configured contacts |
-| `messagebox-sync.service` | Keep the local WhatsApp store synchronized |
+| `messagebox-poller.service` | Queue voice notes and ordinary video soundtracks from configured contacts |
+| `messagebox-sync.service` | Keep one WhatsApp connection alive and the local store synchronized |
 | `messagebox-nfc.service` | Read recipient cards and maintain NFC selection state |
 | `messagebox-dash.service` | Serve the canonical household dashboard on the Wi-Fi interface |
 
 One exact default recipient is stored with the private contact allow-list. A
-recognized NFC selection overrides that default; otherwise the default is used.
-No default, an unknown card, or invalid routing state fails closed.
+recognized NFC selection has first priority for a standalone recording. With no
+card and no claimed inbound message, the exact sender of the newest message
+played within the last hour is preferred in both recording modes. An active
+replay remains the newest played message even while the dashboard hides it in
+the queue, in-flight, hold, or trash state. If that newest fresh route is invalid
+or no longer allowed, recording fails closed; it never selects an older sender
+or the default. The explicit default is used only when played history is absent
+or expired. Unknown-card state and stale or missing NFC reader health also fail
+closed before recent-sender routing.
+
+Continuous sync owns the writable WhatsApp store. Outbound voice notes,
+played reactions, and recording presence use an immediate lock attempt so the
+pinned client delegates them to the active sync connection immediately.
+Commands that require exclusive store access, such as recipient refresh, pause
+sync and retain their bounded lock wait.
+
+The poller accepts wacli media types `audio` and `video`, converts the first
+audio track to the same mono 48 kHz WAV queue format, and retains the exact
+originating chat and sender in the existing private routing sidecar. Ordinary
+videos are bounded by `MSGBOX_VIDEO_MAX_BYTES` and
+`MSGBOX_VIDEO_MAX_DURATION_S`. A download failure is retried; missing audio,
+invalid media, or a configured-limit rejection is recorded and skipped so later
+messages can continue in order. Routine service output reports only generic
+processing status and elapsed time; identifiers and routing details remain in
+the restricted routing sidecars and structured event log.
+
+The pinned wacli 0.17.1 client does not expose WhatsApp circular instant video
+notes. Those notes use the separate WhatsApp `ptvMessage` field, while that
+release only extracts `videoMessage`; no media metadata reaches `messages list`
+or `media download`. Ordinary videos are supported. Circular-note playback
+therefore remains unavailable until the pinned client gains that classification
+and download support, and must not be claimed from poller tests alone.
+
+A fresh valid NFC selection reserves the next button interaction for a new
+outbound message before any unread incoming message is claimed. The incoming
+queue stays intact for the following ordinary press. The selection is one-shot
+and expires when that recording interaction completes or is abandoned. In
+hold-to-record mode, releasing before the hold threshold cancels the selected
+recording intent without playing the queue or saving a silent recording.
+
+After successful playback, the private WAV and routing sidecar move into
+`queue/.played`. The dashboard shows up to 20 metadata records from the last 14
+days, newest first. Playable media is further bounded to the 10 newest files and
+128 MiB; a retained record whose media was pruned remains visible as
+unavailable. Requeueing gives the retained item a fresh queue-order filename so
+it follows messages already waiting, while its sidecar keeps the original
+history identity and reply route. The sidecar is published before the WAV. A
+locked history record names the actual replay file, so repeated or concurrent
+requests cannot create duplicate playable entries and an interrupted
+pre-publication attempt can be retried immediately. The same lock covers replay
+scans, player claim/release/recovery, and dashboard hold/trash moves. Archiving
+keeps the replay marker until the WAV move commits, so restart recovery cannot
+lose the marker and publish a duplicate. History reads, audio access, and
+requeue all enforce expiry without a polling service. Active replays remain part
+of routing history even though the dashboard suppresses their duplicate Recently
+played row. This covers voice notes and ordinary video soundtracks only; it does
+not add circular video-note support.
 
 ## Setup services
 
@@ -46,11 +101,38 @@ No default, an unknown card, or invalid routing state fails closed.
 | `messagebox-onboarding-voice.path` | Watch for the private fixed voice-proof request |
 | `messagebox-onboarding-voice-gate.service` | Validate the request and default before activating hardware |
 | `messagebox-onboarding-voice.target` | Run sync, polling, and the guided setup button without the normal runtime target |
+| `messagebox-mode-reconcile.path` | Reconcile current process state after the onboarding marker changes or an interrupted transition |
+
+## Boot-mode selection
+
+The root-owned `/etc/messagebox-onboarding/enabled` marker is the only
+persistent mode authority. At every manager start and daemon reload,
+`messagebox-mode-generator` validates that marker without following links and
+generates one ephemeral `multi-user.target` dependency: Comitup when the marker
+contains the trusted setup value, or `messagebox.target` when the marker is
+absent. An unsafe marker fails closed and selects neither mode. Neither
+entrypoint is persistently enabled under `multi-user.target`.
+
+Completion and intentional Wi-Fi reset share one transition lock. Each actor
+records a transient reconciliation request before its first side effect, then
+commits its mode with one atomic marker unlink or replacement. The reconciler
+waits for the actor lock, reads the marker, stops the opposite entrypoint and
+starts the selected entrypoint. It never deletes Wi-Fi profiles, rewrites
+recipients, or repeats another transition side effect. The path watcher observes
+only atomic marker creation and unlink, so unrelated onboarding configuration
+writes cannot change process mode. Its `/run` request is consumed once
+before convergence, so a command failure is bounded and a later actor or marker
+event can request a fresh attempt.
 
 During the voice proof, Comitup continues to own connectivity and the
 setup portal while the shared sync and poller services run. The normal
 `messagebox.target`, button, dashboard, and NFC services remain conflicted and
 inactive.
+
+Choosing the same default recipient is retry-safe. The private voice-proof
+request is persisted before recipient setup publishes the `testing` state, so
+an interrupted selection can be retried without choosing or routing to a
+different recipient.
 
 The NFC setup worker runs as `messagebox`, owns I2C and tone playback, and
 offers only a group-restricted Unix socket to the isolated web portal. A read
@@ -61,9 +143,14 @@ one-tag/one-recipient transaction; tags are never written.
 
 Skip or Done creates a fixed, content-free completion request. The root gate
 validates the completed recipient state and default, enables the button, sync,
-poller, canonical dashboard, and NFC reader, removes
-the setup gate, and starts `messagebox.target`. A failed handoff restores setup
-instead of leaving both modes partially active.
+poller, canonical dashboard, and NFC reader under `messagebox.target`, removes
+the setup gate, reloads the boot selector, stops
+Comitup, restarts Avahi, and starts `messagebox.target`. Comitup publishes mDNS
+records during setup; stopping it can remove the hostname's IPv4 record after
+a collision with Avahi's own registration. Restarting Avahi after Comitup exits
+republishes the local hostname for runtime. The restart must succeed before
+runtime starts. A failed handoff restores the setup gate and requests Comitup
+restart, preserving the completion request for retry.
 
 `messagebox-wifi-reset.service` is a one-shot boot check for the physical Wi-Fi
 reset gesture. The setup portal accesses Comitup through a restricted

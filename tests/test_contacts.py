@@ -37,6 +37,21 @@ class ContactStoreTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
+    def test_rename_changes_only_the_display_label(self):
+        self.store.add_contact(PERSON, "Original", receive_after=123, make_default=True)
+        self.store.assign_card(PERSON, CARD_ONE)
+        before = self.store.load()
+
+        renamed = self.store.rename_contact(PERSON, "סבתא")
+
+        after = self.store.load()
+        self.assertEqual(renamed["jid"], PERSON)
+        self.assertEqual(after["default_recipient"], PERSON)
+        self.assertEqual(after["revision"], before["revision"] + 1)
+        self.assertEqual(after["contacts"][PERSON]["label"], "סבתא")
+        for key in ("kind", "receive_after", "card_uids", "card_clip"):
+            self.assertEqual(after["contacts"][PERSON][key], before["contacts"][PERSON][key])
+
     def test_missing_store_loads_empty_without_writing(self):
         self.assertEqual(
             self.store.load(),
@@ -248,6 +263,18 @@ class ContactStoreTests(unittest.TestCase):
         self.assertEqual(self.store.load()["revision"], revision + 1)
         with self.assertRaisesRegex(ContactError, "does not exist"):
             self.store.choose_default_recipient("447700900123@s.whatsapp.net")
+
+    def test_unpaired_onboarding_default_can_be_replaced_atomically(self):
+        self.store.add_contact(PERSON, "Grandma", receive_after=0)
+        revision = self.store.load()["revision"]
+
+        replacement = self.store.replace_default_contact(PERSON, GROUP, "Family")
+
+        document = self.store.load()
+        self.assertEqual(replacement["jid"], GROUP)
+        self.assertEqual(document["default_recipient"], GROUP)
+        self.assertEqual(set(document["contacts"]), {GROUP})
+        self.assertEqual(document["revision"], revision + 1)
 
     def test_contacts_and_listeners_are_isolated(self):
         self.store.add_contact(PERSON, "Grandma", receive_after=0)
